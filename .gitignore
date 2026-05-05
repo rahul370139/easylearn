@@ -4,6 +4,7 @@ node_modules/
 
 # Next.js
 .next/
+frontend/.next/
 out/
 build/
 dist/
@@ -23,6 +24,7 @@ yarn-error.log*
 # Local env files
 .env*.local
 .env
+backend/backend.env
 
 # Vercel
 .vercel
@@ -121,3 +123,13 @@ temp/
 ehthumbs.db
 Thumbs.db
 __pycache__/
+
+# Python virtual environments (kept local)
+backend/venv/
+backend/venv_new/
+.venv/
+backend/.venv/
+
+# Local pytest cache
+.pytest_cache/
+backend/.pytest_cache/

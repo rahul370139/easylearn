@@ -1,0 +1,35 @@
+# Virtual Environment
+venv/
+backend/venv/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+.env.local
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+.pytest_cache/
+tests/
+
+# Data files
+*.csv
+*.xlsx
+# Don't ignore package.json and vercel.json - they are essential for Node.js projects
+
+# Dependencies
+node_modules/
+.pnpm-store/
+.next/
+out/

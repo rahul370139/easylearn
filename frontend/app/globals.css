@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+
+/* base tokens */
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.75rem;
+    /* …chart colours… */
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 94.1%;
+    /* …other dark vars… */
+  }
+}
+
+/* re‑usable components */
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2
+           text-primary-foreground transition-colors hover:bg-primary/90;
+  }
+}
+
+/* misc utilities */
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@tailwind utilities;

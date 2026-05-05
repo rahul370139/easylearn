@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import pandas as pd
+from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from groq import Groq
@@ -12,6 +13,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+_BACKEND_ROOT = Path(__file__).resolve().parent
 
 class DashboardSystem:
     """
@@ -31,7 +34,7 @@ class DashboardSystem:
     def _load_career_data(self) -> pd.DataFrame:
         """Load career data from CSV"""
         try:
-            return pd.read_csv("data/onet_bls_trimmed.csv")
+            return pd.read_csv(_BACKEND_ROOT / "data" / "onet_bls_trimmed.csv")
         except Exception as e:
             logger.warning(f"Could not load career data: {e}")
             return self._create_sample_career_data()
@@ -39,7 +42,7 @@ class DashboardSystem:
     def _load_micro_lessons(self) -> Dict:
         """Load micro lessons from JSON"""
         try:
-            with open("data/micro_lessons.json", "r") as f:
+            with open(_BACKEND_ROOT / "data" / "micro_lessons.json", "r") as f:
                 return json.load(f)
         except Exception as e:
             logger.warning(f"Could not load micro lessons: {e}")

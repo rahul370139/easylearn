@@ -1,15 +1,45 @@
-# TrainPI Backend
+# TrainPI
+
+Monorepo for the TrainPI / SkillSpring project.
+
+- **Backend**: `backend/` (FastAPI)
+- **Frontend**: `frontend/` (Next.js 14)
+
+## Repository layout
+
+- **`backend/`**: FastAPI service + Python modules + bundled JSON/CSV datasets under `backend/data/`
+- **`frontend/`**: Next.js app (SkillSpring UI)
+- **`backend/scripts/`**: offline / maintenance scripts (not imported by the API runtime)
+- **Root deploy configs**: `Procfile`, `render.yaml`
+
+### What the main backend modules do (high level)
+
+- **`backend/main.py`**: FastAPI app + HTTP routes
+- **`backend/schemas.py`**: Pydantic request/response models
+- **`backend/distiller.py`**: PDF ingestion, chunking, embeddings, “learn” chat tooling
+- **`backend/study_agent.py`**: study/diagnostic agent orchestration
+- **`backend/learn_tools.py`**: helpers for generating/ingesting learning artifacts
+- **`backend/validators.py` / `backend/repairs.py`**: quality checks + repair passes for generated content
+- **`backend/mastery.py`**: lightweight mastery tracking (Supabase-backed when configured)
+- **`backend/supabase_helper.py`**: Supabase persistence helpers
+- **`backend/career_matcher.py` / `backend/unified_career_system.py`**: career matching + roadmap logic
+- **`backend/dashboard.py`**: dashboard-oriented recommendations/analytics glue
+- **`backend/data/`**: static datasets used by career + dashboard features
+
+---
+
+## Backend (FastAPI)
 
 A comprehensive backend system for AI-powered career guidance and personalized learning experiences. Built with FastAPI, featuring intelligent PDF processing, LLM-powered content generation, and sophisticated recommendation systems.
 
 ## 🏗️ Architecture Overview
 
 ### Core Components
-- **FastAPI Application** (`main.py`) - Main API server with comprehensive endpoints
-- **Content Distiller** (`distiller.py`) - PDF processing, LLM integration, and content generation
-- **Career System** (`unified_career_system.py`) - Career matching, roadmap generation, and skill analysis
-- **Database Helper** (`supabase_helper.py`) - Supabase integration for data persistence
-- **Data Schemas** (`schemas.py`) - Pydantic models for API contracts
+- **FastAPI Application** (`backend/main.py`) - Main API server with comprehensive endpoints
+- **Content Distiller** (`backend/distiller.py`) - PDF processing, LLM integration, and content generation
+- **Career System** (`backend/unified_career_system.py`) - Career matching, roadmap generation, and skill analysis
+- **Database Helper** (`backend/supabase_helper.py`) - Supabase integration for data persistence
+- **Data Schemas** (`backend/schemas.py`) - Pydantic models for API contracts
 
 ### Technology Stack
 - **Framework**: FastAPI (Python 3.9+)
@@ -17,7 +47,75 @@ A comprehensive backend system for AI-powered career guidance and personalized l
 - **Embeddings**: Cohere (text-embedding-ada-002)
 - **Database**: Supabase (PostgreSQL)
 - **Vector Search**: pgvector extension
-- **Deployment**: Railway/Render
+- **Deployment**: VPS (Docker) / Render (`render.yaml`) / Heroku-style (`Procfile`)
+
+### Run the backend locally
+
+From `TrainPI/backend/`:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Then open `http://127.0.0.1:8000/docs`.
+
+### Deploy backend on Hostinger VPS (Docker)
+
+Prereqs on the VPS: Docker + Docker Compose plugin (you already installed these if `docker compose version` works).
+
+1. **Push this monorepo to GitHub** (the VPS will `git clone` what’s on GitHub, not your laptop folder).
+
+2. **Open ports in Hostinger firewall**
+   - **TCP 22** (SSH)
+   - **TCP 8000** (quick test)
+   - For a proper production setup with HTTPS, you’ll eventually want **TCP 80/443** too (reverse proxy).
+
+3. **On the VPS**, clone and start the API:
+
+```bash
+mkdir -p /opt/trainpi && cd /opt/trainpi
+git clone https://github.com/rahul370139/Backend_skillspring.git
+cd Backend_skillspring/backend
+```
+
+4. Create `backend.env` next to `docker-compose.yml` (same folder as `backend/docker-compose.yml`):
+
+```bash
+cp backend.env.example backend.env
+nano backend.env
+chmod 600 backend.env
+```
+
+At minimum, include the keys your deployment uses (examples):
+
+```env
+GROQ_API_KEY=...
+COHERE_API_KEY=...
+SUPABASE_URL=...
+SUPABASE_KEY=...
+```
+
+5. Build + run:
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker logs -n 200 trainpi-backend
+```
+
+6. Smoke test from your laptop:
+
+- `http://YOUR_VPS_IP:8000/health`
+- `http://YOUR_VPS_IP:8000/docs`
+
+#### Vercel note (important)
+
+Vercel serves your frontend on **HTTPS**. Browsers often block calling a plain **`http://IP:8000`** API (mixed content). For production, put HTTPS in front of the API (for example **Nginx Proxy Manager** on Hostinger Docker Manager + Let’s Encrypt), then set:
+
+- `NEXT_PUBLIC_API_BASE_URL=https://api.yourdomain.com`
 
 ## 🚀 Core Features
 
@@ -198,6 +296,10 @@ COHERE_API_KEY=your_cohere_api_key
 SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_key
 ```
+
+## Frontend (Next.js)
+
+See `frontend/README.md` for setup and environment variables.
 
 ### Railway Deployment
 - **Automatic Scaling**: Based on traffic and load

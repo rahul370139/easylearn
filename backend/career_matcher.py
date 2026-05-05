@@ -50,7 +50,7 @@ class CareerMatcher:
             logger.info(f"Loaded {len(df)} careers")
             return df
         except FileNotFoundError:
-            logger.error("Career data not found. Please run process_dataset.py first.")
+            logger.error("Career data not found. Please run backend/scripts/process_dataset.py first.")
             raise FileNotFoundError("Career data file not found")
     
     def _load_quiz_questions(self) -> List[Dict]:
