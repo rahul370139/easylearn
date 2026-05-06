@@ -1,22 +1,23 @@
 "use client"
 
+import Link from "next/link"
 import { useState, useEffect, useCallback } from "react"
-import { dashboardAPI, userAPI, recommendationAPI, learnAPI } from "@/lib/api"
-import { useSession } from "@supabase/auth-helpers-react"
+import { dashboardAPI, userAPI, recommendationAPI, learnAPI, careerAPI } from "@/lib/api"
+import { useAuth } from "@/components/auth-provider"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Badge } from "@/components/ui/badge"
 import { ProgressOverview } from "@/components/dashboard/progress-overview"
 import { RecentActivity } from "@/components/dashboard/recent-activity"
 import { Achievements } from "@/components/dashboard/achievements"
 import { Recommendations } from "@/components/dashboard/recommendations"
 import { AnalyticsCharts } from "@/components/dashboard/analytics-charts"
-import { RefreshCw } from "lucide-react"
+import { RefreshCw, LogIn } from "lucide-react"
 import { toast } from "@/components/ui/use-toast"
 import type { DashboardData } from "@/types/dashboard"
 import { Suspense } from "react"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
-import { Settings, LogOut } from "lucide-react"
 
 // API Functions with error handling
 const updateUserRole = async (userId: string, role: string) => {
@@ -59,12 +60,13 @@ const getRecommendations = async (userId: string, userRole: string, completedLes
   }
 }
 
-// Mock data generator function
+// Mock data generator function — matches the DashboardData type so guests
+// see a populated layout while we wait for them to sign in.
 const generateMockData = (): DashboardData => ({
   progress: {
-    lessons_completed: 24,
+    completed_lessons: 24,
     total_lessons: 100,
-    completion_percentage: 24,
+    progress_percentage: 24,
     hours_spent: 67.5,
     current_streak: 12,
     skills_learned: 15,
@@ -287,16 +289,28 @@ const generateMockData = (): DashboardData => ({
 export default function DashboardPage() {
   const [dashboardData, setDashboardData] = useState<DashboardData | null>(null)
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [_, setError] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [lastRefreshedAt, setLastRefreshedAt] = useState<string | null>(null)
+  const [savedCareerPlan, setSavedCareerPlan] = useState<{
+    saved_at?: string
+    target_role?: string
+  } | null>(null)
 
-  const session = useSession()
+  // Single source of auth truth. The previous `useSession()` from
+  // @supabase/auth-helpers-react silently returned null because the app
+  // doesn't mount a SessionContextProvider — that's why every signed-in user
+  // saw mock data on this page.
+  const { user, loading: authLoading, signOut } = useAuth()
 
   const fetchDashboardData = useCallback(
     async (showRefreshToast = false) => {
-      if (!session?.user?.id) {
+      if (!user?.id) {
+        // Guest view: show the demo dataset so the page is still useful.
         setDashboardData(generateMockData())
         setLoading(false)
+        setLastRefreshedAt(new Date().toISOString())
+        setSavedCareerPlan(null)
         return
       }
 
@@ -308,11 +322,14 @@ export default function DashboardPage() {
         }
         setError(null)
 
-        const [progressRes, recommendationsRes] = await Promise.allSettled([
-          getUserProgress(session.user.id),
-          getRecommendations(session.user.id, "student", []),
+        const [progressRes, recommendationsRes, careerSnapRes] = await Promise.allSettled([
+          getUserProgress(user.id),
+          getRecommendations(user.id, "student", []),
+          careerAPI.getLatestCareerPlan(user.id),
         ])
 
+        // Use mock data only as a structural skeleton; we overwrite every
+        // section we successfully fetch from the backend.
         const mockData = generateMockData()
         let combinedData: DashboardData = mockData
 
@@ -334,10 +351,20 @@ export default function DashboardPage() {
 
         setDashboardData(combinedData)
 
+        if (careerSnapRes.status === "fulfilled" && careerSnapRes.value?.has_plan && careerSnapRes.value.plan) {
+          const snap = careerSnapRes.value.plan as { target_role?: string }
+          setSavedCareerPlan({
+            saved_at: careerSnapRes.value.saved_at,
+            target_role: snap.target_role,
+          })
+        } else {
+          setSavedCareerPlan(null)
+        }
+
         if (showRefreshToast) {
           toast({
-            title: "Dashboard Updated",
-            description: "Your dashboard data has been refreshed successfully.",
+            title: "Dashboard updated",
+            description: "Your data has been refreshed.",
           })
         }
       } catch (err) {
@@ -346,21 +373,25 @@ export default function DashboardPage() {
 
         if (showRefreshToast) {
           toast({
-            title: "Using Demo Data",
-            description: "Showing demo data while backend services are connecting.",
+            title: "Using demo data",
+            description: "Backend reachable failed; showing the demo dataset.",
           })
         }
       } finally {
         setLoading(false)
         setIsRefreshing(false)
+        if (user?.id) {
+          setLastRefreshedAt(new Date().toISOString())
+        }
       }
     },
-    [session?.user?.id],
+    [user?.id],
   )
 
   useEffect(() => {
+    if (authLoading) return
     fetchDashboardData()
-  }, [fetchDashboardData])
+  }, [authLoading, fetchDashboardData])
 
   const handleExportData = () => {
     if (!dashboardData) return
@@ -429,25 +460,114 @@ export default function DashboardPage() {
     )
   }
 
+  const isSignedIn = !!user?.id
+  const displayName =
+    (user?.user_metadata?.full_name as string | undefined) ||
+    (user?.user_metadata?.name as string | undefined) ||
+    (user?.email ? user.email.split("@")[0] : "")
+  const avatarUrl =
+    (user?.user_metadata?.avatar_url as string | undefined) ||
+    (user?.user_metadata?.picture as string | undefined) ||
+    "/placeholder-user.jpg"
+  const initials = (displayName || user?.email || "G").slice(0, 2).toUpperCase()
+
   return (
     <div className="flex-1 p-4 md:p-8">
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-3xl font-bold">Dashboard</h1>
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon">
-            <Settings className="h-5 w-5" />
-            <span className="sr-only">Settings</span>
+        <div>
+          <h1 className="text-3xl font-bold">Dashboard</h1>
+          <p className="text-sm text-muted-foreground">
+            {isSignedIn
+              ? `Welcome back${displayName ? `, ${displayName}` : ""}.`
+              : "You're viewing the demo dashboard."}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRefresh}
+            disabled={isRefreshing || !isSignedIn}
+            title={isSignedIn ? "Refresh your data" : "Sign in to refresh real data"}
+          >
+            <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
+            {isRefreshing ? "Refreshing…" : "Refresh"}
           </Button>
-          <Button variant="ghost" size="icon">
-            <LogOut className="h-5 w-5" />
-            <span className="sr-only">Log out</span>
-          </Button>
+          {isSignedIn ? (
+            <Button variant="ghost" size="sm" onClick={() => void signOut()}>
+              Sign out
+            </Button>
+          ) : (
+            <Button asChild size="sm">
+              <Link href="/login">
+                <LogIn className="h-4 w-4 mr-2" />
+                Sign in
+              </Link>
+            </Button>
+          )}
           <Avatar className="h-9 w-9">
-            <AvatarImage src="/placeholder-user.jpg" />
-            <AvatarFallback>JP</AvatarFallback>
+            <AvatarImage src={avatarUrl} />
+            <AvatarFallback className="bg-gradient-to-r from-blue-500 to-purple-500 text-white">
+              {initials}
+            </AvatarFallback>
           </Avatar>
         </div>
       </div>
+
+      {!isSignedIn && (
+        <Card className="mb-6 border-dashed border-blue-300 bg-blue-50/50 dark:bg-blue-950/20">
+          <CardContent className="p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">You're seeing demo numbers.</p>
+              <p className="text-xs text-muted-foreground">
+                Sign in to track real progress, save your career roadmap, and see personalised recommendations.
+              </p>
+            </div>
+            <Button asChild>
+              <Link href="/login">Sign in to personalise</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {isSignedIn && (
+        <div className="mb-6 space-y-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <Badge variant="outline" className="bg-green-50 text-green-700 border-green-300 dark:bg-green-950/20 dark:text-green-300">
+              ● Live data for {user.email}
+            </Badge>
+            {lastRefreshedAt && (
+              <span className="text-muted-foreground">
+                Last refreshed{" "}
+                {new Date(lastRefreshedAt).toLocaleString(undefined, {
+                  dateStyle: "medium",
+                  timeStyle: "short",
+                })}
+              </span>
+            )}
+          </div>
+          {savedCareerPlan?.target_role && (
+            <Card className="border-violet-200/80 bg-violet-50/40 dark:bg-violet-950/15 dark:border-violet-900">
+              <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <p className="text-sm font-medium">Saved career upgrade plan</p>
+                  <p className="text-xs text-muted-foreground">
+                    Target: <span className="font-semibold text-foreground">{savedCareerPlan.target_role}</span>
+                    {savedCareerPlan.saved_at
+                      ? ` · Saved ${new Date(savedCareerPlan.saved_at).toLocaleDateString(undefined, {
+                          dateStyle: "medium",
+                        })}`
+                      : ""}
+                  </p>
+                </div>
+                <Button asChild size="sm" variant="secondary">
+                  <Link href="/career">Review on Career page</Link>
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+        </div>
+      )}
 
       <Tabs defaultValue="overview" className="w-full">
         <TabsList className="grid w-full grid-cols-5">

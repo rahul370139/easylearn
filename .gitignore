@@ -133,3 +133,6 @@ backend/.venv/
 # Local pytest cache
 .pytest_cache/
 backend/.pytest_cache/
+
+# Local persisted career plan snapshots
+backend/data/career_plans/

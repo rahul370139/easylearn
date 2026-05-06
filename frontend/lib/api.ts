@@ -300,11 +300,26 @@ export const careerAPI = {
       body: JSON.stringify(data),
     }),
 
+  saveCareerPlanSnapshot: (userId: string, snapshot: Record<string, unknown>) =>
+    apiCall<{ ok: boolean; saved_at: string }>("/api/career/plan/snapshot", {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, snapshot }),
+    }),
+
+  getLatestCareerPlan: (userId: string) =>
+    apiCall<{
+      has_plan: boolean
+      saved_at?: string
+      user_id?: string
+      plan?: Record<string, unknown>
+    }>(`/api/career/plan/latest/${encodeURIComponent(userId)}`),
+
   // One-shot: upload resume and get full upgrade payload (parsed + plan).
-  upgrade: (file: File, target_role: string, interests: string[]) => {
+  upgrade: (file: File, target_role: string, interests: string[], user_id?: string) => {
     const formData = new FormData()
     formData.append("file", file)
     const qs = new URLSearchParams({ target_role, interests: interests.join(",") })
+    if (user_id) qs.set("user_id", user_id)
     const url = urlFor(`/api/career/upgrade?${qs.toString()}`)
     return fetch(url, { method: "POST", body: formData }).then((res) => {
       if (!res.ok) throw new Error(`Career upgrade failed: ${res.status}`)

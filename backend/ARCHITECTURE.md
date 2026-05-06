@@ -17,7 +17,8 @@ flowchart LR
     subgraph API["FastAPI on Hostinger / Railway (main.py)"]
         CHAT["/api/chat<br/>process_chat_message"]
         UPLOAD["/api/chat/upload<br/>process_file_for_chat"]
-        RESUME["/api/career/resume/parse<br/>/api/career/plan/build"]
+        RESUME["/api/career/resume/parse<br/>/api/career/plan/build<br/>/api/career/upgrade<br/>/api/career/plan/snapshot<br/>/api/career/plan/latest/{user_id}"]
+        CAREER["/api/career/match<br/>/api/career/roadmap/unified"]
         DASH["/api/dashboard/*"]
         AGENT["/api/agent/mastery<br/>/api/agent/diagnostic/results"]
     end
@@ -27,6 +28,7 @@ flowchart LR
         RAG[rag_kb.py<br/>interview_prep RAG]
         RES[resume_career.py<br/>resume parser + planner]
         CM[career_matcher.py<br/>RIASEC + O*NET]
+        CPS[career_plan_storage.py<br/>latest plan snapshots]
         DASHM[dashboard.py]
         SH[supabase_helper.py]
         MAST[mastery.py]
@@ -40,13 +42,16 @@ flowchart LR
 
     LP -->|chat / quick actions| CHAT
     LP -->|PDF upload| UPLOAD
-    CP -->|resume PDF| RESUME
-    CP -->|matchCareer / roadmap| API
+    CP -->|resume parse/build/upgrade| RESUME
+    CP -->|matchCareer / roadmap| CAREER
     DP --> DASH
+    DP -.->|latest career plan card| RESUME
 
     CHAT --> DIST
     UPLOAD --> DIST
     RESUME --> RES
+    CAREER --> CM
+    RESUME --> CPS
     DASH --> DASHM
     AGENT --> MAST
 
@@ -266,6 +271,7 @@ If the table is missing, `scripts/test_rag.py` prints the SQL inline and a direc
 | `distiller.py`             | PDF processing, chunking, Cohere embedding, Groq LLM calls, intent dispatcher, all `_handle_*_generation` handlers.           |
 | `rag_kb.py`                | KB ingest + retrieval over `interview_prep_kb`. Standalone CLI: `python -m rag_kb ingest|query …`.                            |
 | `resume_career.py`         | Resume PDF parsing, O*NET row lookup, single-shot LLM call that produces gap analysis + roadmap + 90-day plan.                |
+| `career_plan_storage.py`   | Local JSON persistence for latest resume-driven plan snapshots (`backend/data/career_plans/{user}.json`).                      |
 | `career_matcher.py`        | RIASEC quiz scoring + Cohere-embedding based career similarity over O*NET CSV (`data/onet_bls_trimmed.csv`).                  |
 | `unified_career_system.py` | Older roadmap generator kept for the existing `/api/career/roadmap/unified` endpoint.                                          |
 | `dashboard.py`             | Read-side aggregations for the dashboard page (progress, achievements, recommendations).                                      |
@@ -298,6 +304,8 @@ Only endpoints currently called by the frontend or used operationally are listed
 | ------ | ------------------------------------ | -------------------------------------------------------------------------------------- |
 | POST   | `/api/career/resume/parse`           | NEW. Resume PDF → structured profile.                                                  |
 | POST   | `/api/career/plan/build`             | NEW. Parsed resume + target role + interests → gap + roadmap + 90-day plan.            |
+| POST   | `/api/career/plan/snapshot`          | Save latest generated plan snapshot for a user.                                         |
+| GET    | `/api/career/plan/latest/{user_id}`  | Fetch latest saved plan snapshot for dashboard/career restore.                          |
 | POST   | `/api/career/upgrade`                | NEW. One-shot helper that combines the two above.                                      |
 | POST   | `/api/career/match`                  | RIASEC quiz → top career matches.                                                      |
 | GET    | `/api/career/quiz`                   | The 10 quiz questions.                                                                 |
@@ -353,6 +361,12 @@ When changing the RAG corpus:
 1. Drop new markdown into `interview_prep/`.
 2. Re-run `python -m rag_kb ingest …`. Idempotency comes from `chunk_hash`.
 3. Spot-check with `python -m rag_kb query "<question>"`.
+
+When touching resume-driven plan persistence:
+
+1. `POST /api/career/plan/snapshot` writes the latest plan JSON per user.
+2. `GET /api/career/plan/latest/{user_id}` is the read path used by dashboard.
+3. `POST /api/career/upgrade` can persist automatically when `user_id` query param is provided.
 
 When changing the embedding model:
 

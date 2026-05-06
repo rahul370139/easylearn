@@ -2,9 +2,10 @@
 
 import type React from "react"
 import { learnAPI, chatAPI } from "@/lib/api"
-import { useState, useRef, useEffect } from "react"
+import { useState, useRef, useEffect, useMemo } from "react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
@@ -12,6 +13,17 @@ import { Settings, Send, Brain, Sparkles } from "lucide-react"
 import { toast } from "@/components/ui/use-toast"
 import { useAuth } from "@/components/auth-provider"
 import { UnifiedAIInterface } from "@/components/unified-ai-interface"
+
+const FRAMEWORK_FOCUS_LABELS: Record<string, string> = {
+  general: "General software engineering",
+  react: "React",
+  python: "Python",
+  nodejs: "Node.js",
+  docker: "Docker",
+  fastapi: "FastAPI",
+  "machine-learning": "Machine learning",
+  "data-science": "Data science",
+}
 
 async function uploadToDistill(file: File, ownerId: string) {
   console.log("uploadToDistill called with:", {
@@ -50,12 +62,23 @@ export default function LearnPage() {
   const [framework, setFramework] = useState("general")
   const [appliedExperienceLevel, setAppliedExperienceLevel] = useState("intermediate")
   const [appliedFramework, setAppliedFramework] = useState("general")
+  const [appliedStudyTopic, setAppliedStudyTopic] = useState("")
   const [isDragOver, setIsDragOver] = useState(false)
   const [currentLessonId, setCurrentLessonId] = useState<number | null>(null)
   const [conversationId, setConversationId] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const [studyTopic, setStudyTopic] = useState("")
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { user } = useAuth()
+
+  const studyTopicFocus = useMemo(() => {
+    const parts: string[] = []
+    if (appliedStudyTopic) parts.push(appliedStudyTopic)
+    if (appliedFramework !== "general") {
+      parts.push(FRAMEWORK_FOCUS_LABELS[appliedFramework] || appliedFramework)
+    }
+    return parts.join(" — ")
+  }, [appliedStudyTopic, appliedFramework])
 
   // Load persisted conversation_id on mount
   useEffect(() => {
@@ -79,6 +102,7 @@ export default function LearnPage() {
   const handleApplySettings = () => {
     setAppliedExperienceLevel(experienceLevel)
     setAppliedFramework(framework)
+    setAppliedStudyTopic(studyTopic.trim())
     toast({
       title: "Settings Applied",
       description: `Experience level: ${experienceLevel}, Framework: ${framework}`,
@@ -219,6 +243,7 @@ export default function LearnPage() {
                   files={uploadedFiles}
                   selectedLevel={appliedExperienceLevel}
                   selectedFramework={appliedFramework}
+                  studyTopicFocus={studyTopicFocus || undefined}
                   currentLessonId={currentLessonId}
                   conversationId={conversationId}
                   onConversationIdChange={setConversationId}
@@ -292,6 +317,21 @@ export default function LearnPage() {
                   </Select>
                 </div>
 
+                <div className="space-y-2">
+                  <Label htmlFor="study-topic" className="text-sm font-medium">
+                    Topic (optional)
+                  </Label>
+                  <Input
+                    id="study-topic"
+                    placeholder="e.g. RAG pipelines, accessibility, async Python"
+                    value={studyTopic}
+                    onChange={(e) => setStudyTopic(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Used for quick actions and chat when no PDF covers your question. Applies after you click Apply.
+                  </p>
+                </div>
+
                 <Separator />
 
                 <div className="space-y-3">
@@ -307,6 +347,12 @@ export default function LearnPage() {
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Framework:</span>
                       <span className="font-medium">{appliedFramework}</span>
+                    </div>
+                    <div className="flex justify-between items-start gap-2">
+                      <span className="text-muted-foreground shrink-0">Topic:</span>
+                      <span className="font-medium text-right">
+                        {appliedStudyTopic ? appliedStudyTopic : "—"}
+                      </span>
                     </div>
                   </div>
                 </div>

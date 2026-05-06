@@ -63,6 +63,7 @@ class ChatMessage(BaseModel):
     message: str
     conversation_id: Optional[str] = None
     explanation_level: ExplanationLevel = Field(default=ExplanationLevel.INTERN, description="Explanation complexity level")
+    topic_focus: Optional[str] = Field(default=None, description="Learn-page topic/framework focus merged for RAG + content grounding")
 
 class ChatResponse(BaseModel):
     response: str

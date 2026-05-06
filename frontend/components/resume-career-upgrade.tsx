@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { careerAPI } from "@/lib/api"
 import { useAuth } from "@/components/auth-provider"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -131,9 +131,45 @@ const INTEREST_SUGGESTIONS = [
   "Quant / Finance",
 ]
 
+// localStorage key for persisting resume / role / interests across navigation.
+// We deliberately don't persist the original File (browsers can't rehydrate
+// File objects from JSON) or the generated plan (cheap to regenerate, plus
+// it can get large).
+const STORAGE_KEY = "trainpi:resume_upgrade_state:v1"
+
+interface PersistedState {
+  parsed: ParsedResume | null
+  targetRole: string
+  interests: string[]
+  fileName: string | null
+}
+
+function loadPersisted(): PersistedState | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedState
+    if (!parsed || typeof parsed !== "object") return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function savePersisted(state: PersistedState) {
+  if (typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // ignore quota errors
+  }
+}
+
 export function ResumeCareerUpgrade() {
   const { user } = useAuth()
   const [resumeFile, setResumeFile] = useState<File | null>(null)
+  const [persistedFileName, setPersistedFileName] = useState<string | null>(null)
   const [parsed, setParsed] = useState<ParsedResume | null>(null)
   const [parsing, setParsing] = useState(false)
   const [building, setBuilding] = useState(false)
@@ -141,6 +177,37 @@ export function ResumeCareerUpgrade() {
   const [interests, setInterests] = useState<string[]>([])
   const [customInterest, setCustomInterest] = useState("")
   const [plan, setPlan] = useState<CareerPlanResponse | null>(null)
+
+  // Hydrate from localStorage on mount.
+  useEffect(() => {
+    const persisted = loadPersisted()
+    if (!persisted) return
+    if (persisted.parsed) setParsed(persisted.parsed)
+    if (persisted.targetRole) setTargetRole(persisted.targetRole)
+    if (persisted.interests) setInterests(persisted.interests)
+    if (persisted.fileName) setPersistedFileName(persisted.fileName)
+  }, [])
+
+  // Save whenever the meaningful inputs change.
+  useEffect(() => {
+    if (!parsed && !targetRole && interests.length === 0) return
+    savePersisted({
+      parsed,
+      targetRole,
+      interests,
+      fileName: resumeFile?.name ?? persistedFileName,
+    })
+  }, [parsed, targetRole, interests, resumeFile, persistedFileName])
+
+  const clearSaved = () => {
+    if (typeof window !== "undefined") window.localStorage.removeItem(STORAGE_KEY)
+    setResumeFile(null)
+    setPersistedFileName(null)
+    setParsed(null)
+    setTargetRole("")
+    setInterests([])
+    setPlan(null)
+  }
 
   const handleFile = async (file: File) => {
     if (!file.name.toLowerCase().endsWith(".pdf")) {
@@ -189,12 +256,25 @@ export function ResumeCareerUpgrade() {
     if (!parsed || !targetRole) return
     setBuilding(true)
     try {
-      const result = await careerAPI.buildPlan({
-        resume: parsed,
-        target_role: targetRole,
-        interests,
-      })
+      // Prefer the one-shot endpoint when we still have the source PDF in-memory.
+      // It now persists server-side automatically when user_id is provided.
+      const result = resumeFile
+        ? await careerAPI.upgrade(resumeFile, targetRole, interests, user?.id)
+        : await careerAPI.buildPlan({
+            resume: parsed,
+            target_role: targetRole,
+            interests,
+          })
       setPlan(result)
+      // Fallback persistence path for "build from parsed profile" mode
+      // (e.g. after reload when only cached parsed JSON exists, no File object).
+      if (user?.id && !resumeFile) {
+        try {
+          await careerAPI.saveCareerPlanSnapshot(user.id, result as Record<string, unknown>)
+        } catch (persistErr) {
+          console.warn("Career plan not persisted to server:", persistErr)
+        }
+      }
     } catch (err) {
       console.error(err)
       toast({
@@ -221,7 +301,7 @@ export function ResumeCareerUpgrade() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <input
               id="resume-upload"
               type="file"
@@ -236,14 +316,26 @@ export function ResumeCareerUpgrade() {
               <Button asChild variant="outline" disabled={parsing}>
                 <span>
                   <Upload className="mr-2 h-4 w-4" />
-                  {parsing ? "Parsing…" : resumeFile ? "Replace PDF" : "Choose PDF"}
+                  {parsing ? "Parsing…" : resumeFile || parsed ? "Replace PDF" : "Choose PDF"}
                 </span>
               </Button>
             </Label>
-            {resumeFile && (
-              <span className="text-sm text-muted-foreground truncate max-w-md">{resumeFile.name}</span>
+            {(resumeFile || persistedFileName) && (
+              <span className="text-sm text-muted-foreground truncate max-w-md">
+                {resumeFile?.name || persistedFileName}
+                {!resumeFile && parsed && (
+                  <Badge variant="outline" className="ml-2 text-[10px]">
+                    cached
+                  </Badge>
+                )}
+              </span>
             )}
             {parsing && <Loader2 className="h-4 w-4 animate-spin" />}
+            {(parsed || resumeFile) && (
+              <Button variant="ghost" size="sm" onClick={clearSaved} className="ml-auto">
+                Clear
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>

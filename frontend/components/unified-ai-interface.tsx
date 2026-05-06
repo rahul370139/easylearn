@@ -83,6 +83,8 @@ interface UnifiedAIInterfaceProps {
   files: File[]
   selectedLevel: string
   selectedFramework: string
+  /** Sidebar topic + framework focus; sent as `topic_focus` for KB + generator grounding */
+  studyTopicFocus?: string
   currentLessonId?: number | null
   conversationId?: string | null
   onConversationIdChange?: (id: string) => void
@@ -99,6 +101,7 @@ export function UnifiedAIInterface({
   files,
   selectedLevel,
   selectedFramework,
+  studyTopicFocus,
   currentLessonId,
   conversationId,
   onConversationIdChange,
@@ -119,13 +122,27 @@ export function UnifiedAIInterface({
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const internalFileInputRef = useRef<HTMLInputElement>(null)
   const { user } = useAuth()
+  const topicFocusTrim = (studyTopicFocus ?? "").trim()
+  const focusSuffix = topicFocusTrim ? `\n\nTopic / focus area: ${topicFocusTrim}` : ""
+  const explanationLevelApi =
+    selectedLevel === "beginner" ? "5_year_old" : selectedLevel === "intermediate" ? "intern" : "senior"
+
+  const buildChatPayload = (message: string, extra?: Record<string, unknown>) =>
+    ({
+      message,
+      user_id: user?.id || "anonymous-user",
+      explanation_level: explanationLevelApi,
+      conversation_id: conversationId || undefined,
+      ...(topicFocusTrim ? { topic_focus: topicFocusTrim } : {}),
+      ...(extra ?? {}),
+    }) as Record<string, unknown>
 
   const quickActions = [
     {
       id: "summary",
       label: "Summary",
       icon: FileText,
-      prompt: "Generate a comprehensive summary of the uploaded document with key points",
+      prompt: "Generate a comprehensive summary with key bullet points for the current material",
       description: "Get a concise overview",
       color: "bg-blue-500 hover:bg-blue-600 text-white",
     },
@@ -133,7 +150,7 @@ export function UnifiedAIInterface({
       id: "lesson",
       label: "Lesson",
       icon: BookOpen,
-      prompt: "Create a structured lesson plan from this content with learning objectives",
+      prompt: "Create a structured lesson plan with learning objectives for the current material",
       description: "Generate structured learning",
       color: "bg-green-500 hover:bg-green-600 text-white",
     },
@@ -149,7 +166,7 @@ export function UnifiedAIInterface({
       id: "quiz",
       label: "Quiz",
       icon: HelpCircle,
-      prompt: "Generate an interactive quiz with multiple choice questions from the uploaded document",
+      prompt: "Generate an interactive quiz with multiple choice questions for the current material",
       description: "Practice with questions",
       color: "bg-purple-500 hover:bg-purple-600 text-white",
     },
@@ -157,7 +174,7 @@ export function UnifiedAIInterface({
       id: "flashcards",
       label: "Flashcards",
       icon: Zap,
-      prompt: "Create interactive flashcards for key concepts from the document",
+      prompt: "Create interactive flashcards for key concepts from the current material",
       description: "Quick review cards",
       color: "bg-yellow-500 hover:bg-yellow-600 text-white",
     },
@@ -165,7 +182,7 @@ export function UnifiedAIInterface({
       id: "workflow",
       label: "Workflow",
       icon: BarChart3,
-      prompt: "Create a learning workflow diagram from this content",
+      prompt: "Create a learning workflow diagram for the current material",
       description: "Step-by-step process",
       color: "bg-indigo-500 hover:bg-indigo-600 text-white",
     },
@@ -291,6 +308,57 @@ export function UnifiedAIInterface({
       messageData.type = "lesson"
       messageData.lessonData = data.lesson_data || data.lesson || data.content || data.response
       return messageData
+    }
+
+    const looseTyping = !explicitType || explicitType === "chat"
+    if (looseTyping) {
+      const qPayload =
+        (Array.isArray(data.quiz) && data.quiz.length > 0 && data.quiz) ||
+        (data.quiz_data?.questions && Array.isArray(data.quiz_data.questions) && data.quiz_data.questions.length > 0
+          ? data.quiz_data.questions
+          : null)
+      if (qPayload) {
+        messageData.type = "quiz"
+        messageData.quizData = qPayload
+        return messageData
+      }
+
+      const cardsPayload =
+        (Array.isArray(data.flashcards) && data.flashcards.length > 0 && data.flashcards) ||
+        (data.flashcard_data?.cards &&
+        Array.isArray(data.flashcard_data.cards) &&
+        data.flashcard_data.cards.length > 0
+          ? data.flashcard_data.cards
+          : null)
+      if (cardsPayload) {
+        messageData.type = "flashcards"
+        messageData.flashcardData = cardsPayload
+        return messageData
+      }
+
+      const wf = data.workflow_data
+      if (wf && typeof wf === "object" && Array.isArray((wf as { steps?: unknown }).steps)) {
+        messageData.type = "workflow"
+        messageData.workflowData = wf
+        return messageData
+      }
+
+      const sd = data.summary_data
+      if (sd && typeof sd === "object" && Array.isArray(sd.key_points)) {
+        messageData.type = "summary"
+        const title = sd.title ? `**${sd.title}**\n\n` : ""
+        const overview = sd.overview ? `${sd.overview}` : ""
+        messageData.summaryData = (title + overview).trim() || data.response || ""
+        messageData.keyPoints = sd.key_points
+        return messageData
+      }
+
+      const ld = data.lesson_data
+      if (ld && typeof ld === "object" && (Array.isArray(ld.learning_topics) || ld.title)) {
+        messageData.type = "lesson"
+        messageData.lessonData = ld
+        return messageData
+      }
     }
 
     // Lightweight fallback heuristics for plain chat responses that *look* structured.
@@ -548,14 +616,9 @@ export function UnifiedAIInterface({
     setIsLoading(true)
 
     try {
-      const data = await chatAPI.sendMessage({
-        message: currentMessage,
-        user_id: user?.id || "anonymous-user",
-        explanation_level:
-          selectedLevel === "beginner" ? "5_year_old" : selectedLevel === "intermediate" ? "intern" : "senior",
-        conversation_id: conversationId || undefined,
-        pdf_id: uploadedPdfId || undefined,
-      })
+      const data = await chatAPI.sendMessage(
+        buildChatPayload(currentMessage, uploadedPdfId ? { pdf_id: uploadedPdfId } : undefined),
+      )
 
       if (data.conversation_id && onConversationIdChange) {
         onConversationIdChange(data.conversation_id)
@@ -599,13 +662,7 @@ export function UnifiedAIInterface({
     setIsLoading(true)
 
     try {
-      const data = await chatAPI.sendMessage({
-        message: action.prompt,
-        user_id: user?.id || "anonymous-user",
-        explanation_level:
-          selectedLevel === "beginner" ? "5_year_old" : selectedLevel === "intermediate" ? "intern" : "senior",
-        conversation_id: conversationId || undefined,
-      })
+      const data = await chatAPI.sendMessage(buildChatPayload(action.prompt + focusSuffix))
 
       if (data.conversation_id && onConversationIdChange) {
         onConversationIdChange(data.conversation_id)
@@ -705,7 +762,15 @@ export function UnifiedAIInterface({
       )
     }
 
-    if (message.type === "quiz" && message.quizData && message.quizData.length > 0) {
+    if (message.type === "quiz") {
+      if (!message.quizData || message.quizData.length === 0) {
+        return (
+          <div className="mt-4 text-sm text-muted-foreground">
+            I couldn't build a grounded quiz from this material. Upload a PDF or ask a more specific question
+            (e.g. "create a quiz about transformers").
+          </div>
+        )
+      }
       return (
         <div className="mt-4">
           <QuizComponent

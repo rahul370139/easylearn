@@ -48,6 +48,7 @@ from resume_career import (
     build_career_plan as resume_build_plan,
     upgrade_from_pdf as resume_upgrade,
 )
+from career_plan_storage import save_latest_plan, load_latest_plan
 from dotenv import load_dotenv
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -360,10 +361,11 @@ async def chat_with_ai(request: ChatMessage):
     """Chat with the AI assistant."""
     try:
         result = await process_chat_message(
-            request.user_id, 
-            request.message, 
-            request.conversation_id, 
-            request.explanation_level
+            request.user_id,
+            request.message,
+            request.conversation_id,
+            request.explanation_level,
+            topic_focus=request.topic_focus,
         )
         return ChatResponse(**result)
     except Exception as e:
@@ -1247,10 +1249,41 @@ async def build_resume_plan_endpoint(payload: Dict = None):
         raise HTTPException(500, "Failed to build career plan")
 
 
+@app.post("/api/career/plan/snapshot")
+async def save_career_plan_snapshot_endpoint(payload: Dict = None):
+    """Persist the latest resume-driven career plan for a user (JSON on disk)."""
+    if not payload or not isinstance(payload, dict):
+        raise HTTPException(400, "Body must be JSON with `user_id` and `snapshot`.")
+
+    user_id = (payload.get("user_id") or "").strip()
+    snapshot = payload.get("snapshot")
+    if not user_id:
+        raise HTTPException(400, "`user_id` is required.")
+    if not isinstance(snapshot, dict):
+        raise HTTPException(400, "`snapshot` must be a JSON object (the build-plan API response).")
+
+    try:
+        saved = save_latest_plan(user_id, snapshot)
+        return {"ok": True, "saved_at": saved["saved_at"]}
+    except Exception as e:
+        logger.error(f"Career plan snapshot save failed: {e}")
+        raise HTTPException(500, "Failed to save career plan")
+
+
+@app.get("/api/career/plan/latest/{user_id}")
+async def get_latest_career_plan_endpoint(user_id: str):
+    """Return the last saved plan snapshot, or `has_plan: false` if none."""
+    row = load_latest_plan(user_id)
+    if not row:
+        return {"has_plan": False}
+    return {"has_plan": True, **row}
+
+
 @app.post("/api/career/upgrade")
 async def career_upgrade_endpoint(
     target_role: str = Query(..., description="Target career role"),
     interests: str = Query("", description="Comma-separated interests"),
+    user_id: str = Query("", description="Optional user id for persisting latest plan snapshot"),
     file: UploadFile = File(...),
 ):
     """One-shot: upload resume + target_role + interests → full upgrade payload."""
@@ -1262,7 +1295,15 @@ async def career_upgrade_endpoint(
     tmp.write(await file.read())
     tmp.close()
     try:
-        return await resume_upgrade(Path(tmp.name), target_role, interest_list)
+        result = await resume_upgrade(Path(tmp.name), target_role, interest_list)
+        # If we know the user, persist the one-shot output so dashboard/career
+        # pages can pick up the latest generated plan without extra client calls.
+        if user_id.strip():
+            try:
+                save_latest_plan(user_id.strip(), result)
+            except Exception as persist_err:
+                logger.warning(f"Could not persist one-shot career plan for {user_id}: {persist_err}")
+        return result
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:

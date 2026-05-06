@@ -923,15 +923,23 @@ export function DiagnosticComponent({
           <p className="text-lg font-medium leading-relaxed">{questions[currentQuestion].question}</p>
         </Card>
 
+        {(() => {
+          const q = questions[currentQuestion]
+          // Default to multiple_choice when the LLM forgets to set `type` —
+          // otherwise the question text would render with no answer UI below it.
+          // We treat true_false and fill_blank as the only special cases.
+          const rawType = (q.type || "").toLowerCase()
+          const isTrueFalse = rawType === "true_false"
+          const isFillBlank = rawType === "fill_blank"
+          const isMC = !isTrueFalse && !isFillBlank
+          return (
         <div className="space-y-3">
           <h4 className="font-semibold text-muted-foreground">
-            {questions[currentQuestion].type === "true_false" ? "True or False:" :
-             questions[currentQuestion].type === "fill_blank" ? "Fill in the blank:" :
-             "Choose your answer:"}
+            {isTrueFalse ? "True or False:" : isFillBlank ? "Fill in the blank:" : "Choose your answer:"}
           </h4>
-          
-          {/* Multiple Choice Questions */}
-          {questions[currentQuestion].type === "multiple_choice" && questions[currentQuestion].options.map((option, index) => (
+
+          {/* Multiple Choice (default) */}
+          {isMC && (q.options || []).map((option, index) => (
             <Button
               key={index}
               variant={selectedAnswers[currentQuestion] === option ? "default" : "outline"}
@@ -958,7 +966,7 @@ export function DiagnosticComponent({
           ))}
           
           {/* True/False Questions */}
-          {questions[currentQuestion].type === "true_false" && (
+          {isTrueFalse && (
             <div className="grid grid-cols-2 gap-4">
               <Button
                 variant={selectedAnswers[currentQuestion] === "True" ? "default" : "outline"}
@@ -986,7 +994,7 @@ export function DiagnosticComponent({
           )}
           
           {/* Fill in the Blank Questions */}
-          {questions[currentQuestion].type === "fill_blank" && (
+          {isFillBlank && (
             <div className="space-y-4">
               <div className="p-4 bg-gray-50 dark:bg-gray-900/50 rounded-lg border-2 border-dashed border-gray-300 dark:border-gray-700">
                 <p className="text-sm text-muted-foreground mb-2">Type your answer below:</p>
@@ -1008,6 +1016,8 @@ export function DiagnosticComponent({
             </div>
           )}
         </div>
+          )
+        })()}
 
         <div className="flex justify-between items-center pt-6 border-t">
           <Button
@@ -1396,40 +1406,99 @@ export function WorkflowComponent({ workflow, onAction }: WorkflowComponentProps
 }
 
 // Lesson Component
+//
+// The backend (`distiller._handle_lesson_generation`) returns a learning plan
+// shaped like:
+//   { title, overview, difficulty_level, learning_topics: [...], learning_path: [...] }
+// Earlier prototypes used a flatter `{ title, content, objectives, sections }`
+// shape, and this component still falls back to that for backward compat
+// (e.g. if a previously cached payload is replayed).
+interface LearningTopic {
+  topic?: string
+  description?: string
+  estimated_time?: string
+  prerequisites?: string[]
+  key_concepts?: string[]
+}
+
+interface ParsedLesson {
+  title: string
+  overview?: string
+  difficulty?: string
+  topics: LearningTopic[]
+  path: string[]
+  // Legacy fields, used only when the new shape is absent.
+  legacyContent?: string
+  legacySections?: string[]
+  legacyObjectives?: string[]
+}
+
 interface LessonComponentProps {
   lesson: any
   onAction?: (action: string) => void
 }
 
-export function LessonComponent({ lesson, onAction }: LessonComponentProps) {
-  const parseLessonContent = (lessonData: any) => {
-    if (typeof lessonData === "string") {
-      return {
-        title: "Structured Lesson",
-        content: lessonData,
-        objectives: ["Master the key concepts", "Apply knowledge effectively", "Build practical understanding"],
-        sections: lessonData.split("\n\n").filter((section) => section.trim().length > 0),
-      }
-    }
-
-    if (typeof lessonData === "object" && lessonData !== null) {
-      return {
-        title: lessonData.title || "Structured Lesson",
-        content: lessonData.content || JSON.stringify(lessonData, null, 2),
-        objectives: lessonData.objectives || lessonData.learning_objectives || ["Master the key concepts"],
-        sections: lessonData.sections || [lessonData.content || JSON.stringify(lessonData, null, 2)],
-      }
-    }
-
+function parseLesson(raw: any): ParsedLesson {
+  if (typeof raw === "string") {
+    const sections = raw.split("\n\n").map((s) => s.trim()).filter(Boolean)
     return {
-      title: "Structured Lesson",
-      content: "Lesson content will be displayed here.",
-      objectives: ["Master the key concepts"],
-      sections: ["Lesson content will be displayed here."],
+      title: "Lesson",
+      topics: [],
+      path: [],
+      legacyContent: raw,
+      legacySections: sections,
+      legacyObjectives: [],
     }
   }
+  if (raw && typeof raw === "object") {
+    const topics: LearningTopic[] = Array.isArray(raw.learning_topics) ? raw.learning_topics : []
+    const path: string[] = Array.isArray(raw.learning_path) ? raw.learning_path : []
+    const legacySections: string[] = Array.isArray(raw.sections)
+      ? raw.sections
+      : typeof raw.content === "string"
+        ? raw.content.split("\n\n").map((s: string) => s.trim()).filter(Boolean)
+        : []
+    return {
+      title: raw.title || "Lesson",
+      overview: typeof raw.overview === "string" ? raw.overview : undefined,
+      difficulty: typeof raw.difficulty_level === "string" ? raw.difficulty_level : undefined,
+      topics,
+      path,
+      legacyContent: typeof raw.content === "string" ? raw.content : undefined,
+      legacySections,
+      legacyObjectives: Array.isArray(raw.objectives)
+        ? raw.objectives
+        : Array.isArray(raw.learning_objectives)
+          ? raw.learning_objectives
+          : [],
+    }
+  }
+  return { title: "Lesson", topics: [], path: [] }
+}
 
-  const parsedLesson = parseLessonContent(lesson)
+export function LessonComponent({ lesson, onAction }: LessonComponentProps) {
+  const parsed = parseLesson(lesson)
+  const hasNewShape = parsed.topics.length > 0 || parsed.path.length > 0
+  const hasLegacy = (parsed.legacySections?.length ?? 0) > 0 || !!parsed.legacyContent
+
+  if (!hasNewShape && !hasLegacy && !parsed.overview) {
+    return (
+      <Card className="w-full max-w-3xl mx-auto">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BookOpen className="h-5 w-5 text-green-600" />
+            {parsed.title}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            We couldn't build a grounded lesson from this material. Try uploading a more detailed PDF, or ask
+            a more specific question (e.g. "create a lesson about RAG systems").
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
 
   return (
     <Card className="w-full max-w-3xl mx-auto border-2 border-green-200 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950/20 dark:to-emerald-950/20">
@@ -1437,101 +1506,133 @@ export function LessonComponent({ lesson, onAction }: LessonComponentProps) {
         <CardTitle className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-green-700 dark:text-green-300">
             <BookOpen className="h-6 w-6" />
-            Lesson Plan
+            {parsed.title}
           </div>
           <div className="flex gap-1">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onAction?.("copy")}
-              className="hover:bg-green-200 dark:hover:bg-green-800"
-            >
+            <Button variant="ghost" size="sm" onClick={() => onAction?.("copy")} className="hover:bg-green-200 dark:hover:bg-green-800">
               <Copy className="h-4 w-4" />
             </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => onAction?.("download")}
-              className="hover:bg-green-200 dark:hover:bg-green-800"
-            >
+            <Button variant="ghost" size="sm" onClick={() => onAction?.("download")} className="hover:bg-green-200 dark:hover:bg-green-800">
               <Download className="h-4 w-4" />
             </Button>
           </div>
         </CardTitle>
+        {(parsed.overview || parsed.difficulty) && (
+          <p className="text-sm text-green-800/80 dark:text-green-200/80 mt-2 whitespace-pre-wrap">
+            {parsed.overview}
+            {parsed.difficulty && (
+              <Badge variant="outline" className="ml-2 align-middle">
+                {parsed.difficulty}
+              </Badge>
+            )}
+          </p>
+        )}
       </CardHeader>
+
       <CardContent className="space-y-6 p-6">
-        <div className="p-6 bg-gradient-to-r from-green-100 to-teal-100 dark:from-green-900/30 dark:to-teal-900/30 rounded-xl border-l-4 border-green-500 shadow-sm">
-          <div className="flex items-start gap-3">
-            <div className="w-8 h-8 bg-green-500 rounded-full flex items-center justify-center shrink-0 mt-1">
-              <Target className="h-4 w-4 text-white" />
+        {hasNewShape && parsed.topics.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5 text-green-600" />
+              <h4 className="font-semibold text-lg text-green-700 dark:text-green-300">Learning topics</h4>
             </div>
-            <div className="flex-1">
-              <h3 className="font-semibold text-green-800 dark:text-green-200 mb-3">Learning Objectives</h3>
-              <ul className="space-y-2">
-                {parsedLesson.objectives.map((objective: string, index: number) => (
-                  <li key={index} className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
-                    <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 shrink-0" />
-                    <span>{objective}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
-        </div>
-
-        <div className="space-y-4">
-          <div className="flex items-center gap-2 mb-4">
-            <BookOpen className="h-5 w-5 text-green-600" />
-            <h4 className="font-semibold text-lg text-green-700 dark:text-green-300">Lesson Content</h4>
-          </div>
-
-          <div className="space-y-4">
-            {parsedLesson.sections.map((section: any, index: number) => (
-              <div
-                key={index}
-                className="p-5 bg-white dark:bg-gray-900/50 rounded-lg border border-green-200 dark:border-green-800 shadow-sm"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold shrink-0 mt-1">
-                    {index + 1}
-                  </div>
-                  <div className="flex-1">
-                    <div className="prose prose-sm max-w-none">
-                      <p className="text-base leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap m-0">
-                        {section}
-                      </p>
+            <div className="space-y-3">
+              {parsed.topics.map((t, i) => (
+                <div
+                  key={i}
+                  className="p-4 bg-white dark:bg-gray-900/50 rounded-lg border border-green-200 dark:border-green-800"
+                >
+                  <div className="flex items-start gap-3">
+                    <div className="w-7 h-7 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-bold shrink-0 mt-0.5">
+                      {i + 1}
+                    </div>
+                    <div className="flex-1 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-medium text-green-900 dark:text-green-200">{t.topic || `Topic ${i + 1}`}</p>
+                        {t.estimated_time && (
+                          <Badge variant="outline" className="text-[10px]">
+                            ⏱ {t.estimated_time}
+                          </Badge>
+                        )}
+                      </div>
+                      {t.description && (
+                        <p className="text-sm text-gray-700 dark:text-gray-300">{t.description}</p>
+                      )}
+                      {t.prerequisites && t.prerequisites.length > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          <span className="font-medium">Prereqs:</span> {t.prerequisites.join(", ")}
+                        </p>
+                      )}
+                      {t.key_concepts && t.key_concepts.length > 0 && (
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {t.key_concepts.map((k, ki) => (
+                            <Badge key={ki} variant="secondary" className="text-[10px]">
+                              {k}
+                            </Badge>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <Separator className="my-6" />
-
-        <div className="bg-gradient-to-r from-green-50 to-blue-50 dark:from-green-950/30 dark:to-blue-950/30 p-5 rounded-lg border border-green-200 dark:border-green-800">
-          <div className="flex justify-between items-center flex-wrap gap-4">
-            <div className="flex items-center gap-6 text-sm text-muted-foreground">
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
-                <span>⏱️ Estimated time: 15-20 minutes</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
-                <span>📚 {parsedLesson.sections.length} sections</span>
-              </div>
-            </div>
-            <div className="flex gap-2">
-              <Badge variant="outline" className="bg-green-100 text-green-700 border-green-300">
-                Beginner Friendly
-              </Badge>
-              <Badge variant="outline" className="bg-blue-100 text-blue-700 border-blue-300">
-                Interactive
-              </Badge>
+              ))}
             </div>
           </div>
-        </div>
+        )}
+
+        {hasNewShape && parsed.path.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Target className="h-5 w-5 text-green-600" />
+              <h4 className="font-semibold text-lg text-green-700 dark:text-green-300">Suggested learning path</h4>
+            </div>
+            <ol className="space-y-2">
+              {parsed.path.map((step, i) => (
+                <li
+                  key={i}
+                  className="flex items-start gap-3 p-3 bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-950/20 dark:to-emerald-950/20 rounded-lg border-l-4 border-green-400"
+                >
+                  <div className="w-6 h-6 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-full flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">
+                    {i + 1}
+                  </div>
+                  <span className="text-sm leading-relaxed text-gray-700 dark:text-gray-300">{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {!hasNewShape && hasLegacy && (
+          <div className="space-y-4">
+            {parsed.legacyObjectives && parsed.legacyObjectives.length > 0 && (
+              <div className="p-5 bg-gradient-to-r from-green-100 to-teal-100 dark:from-green-900/30 dark:to-teal-900/30 rounded-xl border-l-4 border-green-500">
+                <h3 className="font-semibold text-green-800 dark:text-green-200 mb-2">Learning objectives</h3>
+                <ul className="space-y-1">
+                  {parsed.legacyObjectives.map((o, i) => (
+                    <li key={i} className="flex items-start gap-2 text-sm text-gray-700 dark:text-gray-300">
+                      <CheckCircle className="h-4 w-4 text-green-600 mt-0.5 shrink-0" />
+                      <span>{o}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {parsed.legacySections && parsed.legacySections.length > 0 && (
+              <div className="space-y-3">
+                {parsed.legacySections.map((section, i) => (
+                  <div
+                    key={i}
+                    className="p-5 bg-white dark:bg-gray-900/50 rounded-lg border border-green-200 dark:border-green-800"
+                  >
+                    <p className="text-sm leading-relaxed text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
+                      {section}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </CardContent>
     </Card>
   )

@@ -908,15 +908,158 @@ def add_message_to_conversation(conversation_id: str, role: str, content: str):
     except Exception:
         pass
 
-async def process_chat_message(user_id: str, message: str, conversation_id: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+
+def _apply_study_focus_topic(extracted: str, study_focus: Optional[str], default: str) -> str:
+    """Prefer an explicit user topic; fall back to Learn-page sidebar focus."""
+    t = (extracted or "").strip()
+    tl = t.lower()
+    bad = {"", "your document", "this material", "the loaded material"}
+    if t and tl not in bad:
+        return t
+    if study_focus and study_focus.strip():
+        return study_focus.strip()
+    return t if t else default
+
+
+def _detect_learning_intent(message_lower: str) -> Optional[str]:
+    """Map free-text study requests to structured handlers (order = specificity)."""
+    short = message_lower.strip()
+    if short in (
+        "quiz",
+        "a quiz",
+        "mcq",
+        "practice quiz",
+        "lesson",
+        "microlesson",
+        "summary",
+        "overview",
+        "recap",
+        "flashcards",
+        "flashcard",
+        "flash cards",
+        "workflow",
+        "flowchart",
+        "diagram",
+        "diagnostic",
+        "readiness check",
+    ):
+        kind = {
+            "quiz": "quiz",
+            "a quiz": "quiz",
+            "mcq": "quiz",
+            "practice quiz": "quiz",
+            "lesson": "lesson",
+            "microlesson": "lesson",
+            "summary": "summary",
+            "overview": "summary",
+            "recap": "summary",
+            "flashcards": "flashcards",
+            "flashcard": "flashcards",
+            "flash cards": "flashcards",
+            "workflow": "workflow",
+            "flowchart": "workflow",
+            "diagram": "workflow",
+            "diagnostic": "diagnostic",
+            "readiness check": "diagnostic",
+        }
+        return kind[short]
+
+    diagnostic_phrases = (
+        "run a diagnostic", "diagnostic assessment", "run diagnostic", "assess my knowledge",
+        "knowledge audit", "readiness check", "placement test", "gauge my understanding",
+        "how well do i know", "skills check", "exam prep questions", "test my readiness",
+        "knowledge test", "test my knowledge",
+    )
+    if any(p in message_lower for p in diagnostic_phrases):
+        return "diagnostic"
+    if "diagnostic" in message_lower and any(
+        w in message_lower for w in ("run", "assessment", "test", "check", "prep", "quiz")
+    ):
+        return "diagnostic"
+
+    lesson_phrases = (
+        "create lesson", "generate lesson", "make lesson", "lesson about", "create microlearning",
+        "create a lesson", "make a lesson", "study plan", "learning plan", "course outline",
+        "syllabus for", "teach me about", "micro lesson", "learning path for", "module on",
+    )
+    if any(p in message_lower for p in lesson_phrases):
+        return "lesson"
+
+    quiz_phrases = (
+        "create quiz", "generate quiz", "make quiz", "quiz about", "quiz questions",
+        "more quiz", "more questions", "practice quiz", "pop quiz", "mcq", "multiple choice",
+        "multiple-choice", "quiz me", "quiz me on", "give me questions", "practice questions",
+        "test questions", "question bank", "drill me", "test me on",
+    )
+    if any(p in message_lower for p in quiz_phrases):
+        return "quiz"
+    if any(
+        p in message_lower
+        for p in (
+            "give me a quiz",
+            "i need a quiz",
+            "make me a quiz",
+            "build a quiz",
+            "some quiz questions",
+        )
+    ):
+        return "quiz"
+
+    flash_phrases = (
+        "create flashcards", "generate flashcards", "make flashcards", "flashcards about",
+        "flashcard", "more flashcards", "more cards", "study cards", "revision cards",
+        "flash cards", "active recall", "spaced repetition",
+    )
+    if any(p in message_lower for p in flash_phrases):
+        return "flashcards"
+    if any(
+        p in message_lower
+        for p in (
+            "i want flashcards",
+            "need flashcards",
+            "give me flashcards",
+            "make me flashcards",
+        )
+    ):
+        return "flashcards"
+
+    workflow_phrases = (
+        "create workflow", "generate workflow", "make diagram", "create chart", "workflow about",
+        "process map", "standard operating procedure", "step-by-step", "step by step",
+        "pipeline for", "sequence of steps", "how does the process",
+    )
+    if "diagram" in message_lower or "flowchart" in message_lower:
+        return "workflow"
+    if any(p in message_lower for p in workflow_phrases):
+        return "workflow"
+
+    summary_phrases = (
+        "create summary", "generate summary", "make summary", "summarize", "summarise",
+        "bullet points", "key takeaways", "executive summary", "tldr", "tl;dr",
+        "high-level summary", "overview of", "recap this", "condense this", "compress this",
+    )
+    if any(p in message_lower for p in summary_phrases):
+        return "summary"
+
+    return None
+
+
+async def process_chat_message(
+    user_id: str,
+    message: str,
+    conversation_id: Optional[str],
+    explanation_level: ExplanationLevel,
+    topic_focus: Optional[str] = None,
+) -> Dict:
     """Process a chat message and generate a response with enhanced learning content options."""
     try:
         conv_id = get_or_create_conversation(conversation_id, user_id)
         add_message_to_conversation(conv_id, "user", message)
-        
+
+        study_focus = (topic_focus or "").strip() or None
+
         # Get conversation context
         conversation = conversation_store[conv_id]
-        messages = conversation["messages"]
         file_context = conversation.get("file_context")
 
         # If the user has not uploaded a PDF for this conversation, fall back
@@ -926,7 +1069,8 @@ async def process_chat_message(user_id: str, message: str, conversation_id: Opti
         if not file_context:
             try:
                 from rag_kb import retrieve_kb, format_kb_context
-                kb_matches = await retrieve_kb(message, top_k=6)
+                kb_query = f"{message}\n{study_focus}" if study_focus else message
+                kb_matches = await retrieve_kb(kb_query, top_k=6)
                 if kb_matches:
                     kb_text = format_kb_context(kb_matches)
                     if kb_text:
@@ -941,60 +1085,86 @@ async def process_chat_message(user_id: str, message: str, conversation_id: Opti
             except Exception as e:
                 logger.debug(f"KB retrieval skipped: {e}")
 
-        # Check for special commands
         message_lower = message.lower().strip()
-        
-        # Enhanced command detection (broader patterns: singular/plural variants)
-        if any(cmd in message_lower for cmd in [
-            "create lesson", "generate lesson", "make lesson", "lesson about", "create microlearning", "create a lesson", "make a lesson"
-        ]):
-            return await _handle_lesson_generation(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in [
-            "create quiz", "generate quiz", "make quiz", "quiz about", "quiz questions", "more quiz", "more questions"
-        ]):
-            return await _handle_quiz_generation(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in [
-            "create flashcards", "generate flashcards", "make flashcards", "flashcards about", "flashcard", "more flashcards", "more cards"
-        ]):
-            return await _handle_flashcard_generation(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in [
-            "create workflow", "generate workflow", "make diagram", "create chart", "workflow about", "diagram", "flowchart"
-        ]):
-            return await _handle_workflow_generation(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in [
-            "create summary", "generate summary", "make summary", "summarize", "bullet points", "summary"
-        ]):
-            return await _handle_summary_generation(message, conv_id, file_context, explanation_level)
+        intent = _detect_learning_intent(message_lower)
 
-        elif any(cmd in message_lower for cmd in [
-            "run a diagnostic", "diagnostic assessment", "run diagnostic", "diagnostic", "assess my knowledge",
-            "test my knowledge", "knowledge test"
-        ]):
-            return await _handle_diagnostic_generation(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in ["explain like 5", "explain like 15", "explain like senior", "explain for beginner", "explain for expert"]):
+        if intent == "lesson":
+            return await _handle_lesson_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+        if intent == "quiz":
+            return await _handle_quiz_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+        if intent == "flashcards":
+            return await _handle_flashcard_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+        if intent == "workflow":
+            return await _handle_workflow_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+        if intent == "summary":
+            return await _handle_summary_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+        if intent == "diagnostic":
+            return await _handle_diagnostic_generation(
+                message, conv_id, file_context, explanation_level, study_focus
+            )
+
+        if any(
+            cmd in message_lower
+            for cmd in [
+                "explain like 5",
+                "explain like 15",
+                "explain like senior",
+                "explain for beginner",
+                "explain for expert",
+            ]
+        ):
             return await _handle_explanation_level_change(message, conv_id, file_context, explanation_level)
-        
-        elif any(cmd in message_lower for cmd in ["help", "commands", "what can you do", "options"]):
+
+        if any(cmd in message_lower for cmd in ["help", "commands", "what can you do", "options"]):
             return await _handle_help_command(conv_id, file_context)
-        
-        # Regular chat message
-        else:
-            return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
-        
+
+        return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
+
     except Exception as e:
         logger.error(f"Chat message processing failed: {e}")
         raise RuntimeError("Failed to process chat message.")
 
-async def _handle_lesson_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_lesson_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Enhanced lesson generation with microlearning focus."""
     try:
-        # Extract topic from message
-        topic = _extract_topic_from_message(message, ["lesson about", "create lesson", "generate lesson", "make lesson", "create microlearning"])
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "lesson about",
+                    "create lesson",
+                    "generate lesson",
+                    "make lesson",
+                    "create microlearning",
+                    "study plan",
+                    "learning plan",
+                    "course outline",
+                    "syllabus for",
+                    "teach me about",
+                    "micro lesson",
+                    "learning path for",
+                    "module on",
+                ],
+            ),
+            study_focus,
+            "your document",
+        )
         
         # Get conversation metadata for context
         conversation = conversation_store.get(conv_id, {})
@@ -1044,12 +1214,36 @@ async def _handle_lesson_generation(message: str, conv_id: str, file_context: Op
         logger.error(f"Lesson generation failed: {e}")
         return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
 
-async def _handle_quiz_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_quiz_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Handle quiz generation command."""
     try:
-        topic = _extract_topic_from_message(message, ["quiz about", "create quiz", "generate quiz", "make quiz"])
-        if not topic or not topic.strip():
-            topic = "your document"
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "quiz about",
+                    "create quiz",
+                    "generate quiz",
+                    "make quiz",
+                    "quiz me on",
+                    "quiz me",
+                    "practice quiz",
+                    "pop quiz",
+                    "practice questions",
+                    "test questions",
+                    "question bank",
+                    "give me questions",
+                ],
+            ),
+            study_focus,
+            "your document",
+        )
         
         # Retrieval-augmented quiz: pick top chunks
         chunks = conversation_store.get(conv_id, {}).get("chunks", [])
@@ -1074,20 +1268,9 @@ async def _handle_quiz_generation(message: str, conv_id: str, file_context: Opti
         
         add_message_to_conversation(conv_id, "assistant", response)
         
-        # Normalize shape to match /api/lesson/{id}/quiz -> { content: { questions: [...] } }
         normalized_quiz = {"questions": qa.get("quiz", qa.get("questions", []))}
-        # Build a textual preview to ensure FE shows content immediately
-        preview_lines = []
-        for i, q in enumerate(normalized_quiz.get("questions", [])[:min(len(normalized_quiz.get("questions", [])), 10)], start=1):
-            try:
-                opts = q.get("options") or []
-                opts_txt = f" A) {opts[0]}  B) {opts[1]}  C) {opts[2]}  D) {opts[3]}" if len(opts) >= 4 else ""
-                preview_lines.append(f"{i}. {q.get('question','')}\n{opts_txt}")
-            except Exception:
-                preview_lines.append(f"{i}. {q}")
-        response_with_preview = response + ("\n\n" + "\n".join(preview_lines) if preview_lines else "")
         return {
-            "response": response_with_preview,
+            "response": response,
             "conversation_id": conv_id,
             "message_id": str(uuid.uuid4()),
             "timestamp": datetime.utcnow().isoformat(),
@@ -1100,12 +1283,33 @@ async def _handle_quiz_generation(message: str, conv_id: str, file_context: Opti
         logger.error(f"Quiz generation failed: {e}")
         return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
 
-async def _handle_flashcard_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_flashcard_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Handle flashcard generation command."""
     try:
-        topic = _extract_topic_from_message(message, ["flashcards about", "create flashcards", "generate flashcards", "make flashcards"])
-        if not topic or not topic.strip():
-            topic = "your document"
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "flashcards about",
+                    "create flashcards",
+                    "generate flashcards",
+                    "make flashcards",
+                    "flashcard",
+                    "study cards",
+                    "revision cards",
+                    "active recall",
+                    "spaced repetition",
+                ],
+            ),
+            study_focus,
+            "your document",
+        )
         
         # Retrieval-augmented flashcards
         chunks = conversation_store.get(conv_id, {}).get("chunks", [])
@@ -1131,16 +1335,8 @@ async def _handle_flashcard_generation(message: str, conv_id: str, file_context:
         
         # Normalize shape to match /api/lesson/{id}/flashcards -> { content: { cards: [...] } }
         normalized_cards = {"cards": qa.get("flashcards", qa.get("cards", []))}
-        # Build textual preview to ensure FE shows content immediately
-        preview_lines = []
-        for i, c in enumerate(normalized_cards.get("cards", [])[:min(len(normalized_cards.get("cards", [])), 12)], start=1):
-            try:
-                preview_lines.append(f"Card {i}:\nFront: {c.get('front','')}\nBack: {c.get('back','')}")
-            except Exception:
-                preview_lines.append(f"Card {i}: {c}")
-        response_with_preview = response + ("\n\n" + "\n\n".join(preview_lines) if preview_lines else "")
         return {
-            "response": response_with_preview,
+            "response": response,
             "conversation_id": conv_id,
             "message_id": str(uuid.uuid4()),
             "timestamp": datetime.utcnow().isoformat(),
@@ -1280,7 +1476,13 @@ You can also generate lessons, quizzes, and flashcards when asked."""
         "type": "chat"
     }
 
-async def _handle_workflow_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_workflow_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Generate a structured, retrieval-grounded workflow.
 
     Earlier versions of this handler produced bland graphs ("Start → Process →
@@ -1293,12 +1495,25 @@ async def _handle_workflow_generation(message: str, conv_id: str, file_context: 
          from the document summary itself when the model misbehaves.
     """
     try:
-        topic = _extract_topic_from_message(
-            message,
-            ["workflow about", "create workflow", "generate workflow", "make diagram", "create chart", "flowchart", "diagram"],
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "workflow about",
+                    "create workflow",
+                    "generate workflow",
+                    "make diagram",
+                    "create chart",
+                    "learning workflow",
+                    "process map",
+                    "flowchart",
+                    "diagram",
+                    "pipeline for",
+                ],
+            ),
+            study_focus,
+            "the loaded material",
         )
-        if not topic or not topic.strip():
-            topic = "the loaded material"
 
         # Retrieval: same pattern as quiz/flashcards/diagnostic handlers
         chunks = conversation_store.get(conv_id, {}).get("chunks", [])
@@ -1452,12 +1667,33 @@ def _build_fallback_workflow_from_context(topic: str, ground: str) -> Dict:
         "mermaid_code": _mermaid_from_steps(steps),
     }
 
-async def _handle_summary_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_summary_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Handle summary/bullet points generation command."""
     try:
-        topic = _extract_topic_from_message(message, ["summary about", "create summary", "generate summary", "make summary", "summarize", "bullet points"])
-        if not topic or not topic.strip():
-            topic = "your document"
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "summary about",
+                    "create summary",
+                    "generate summary",
+                    "make summary",
+                    "summarize",
+                    "summarise",
+                    "bullet points",
+                    "key takeaways",
+                    "executive summary",
+                ],
+            ),
+            study_focus,
+            "your document",
+        )
         
         if file_context:
             # Use existing file context for summary
@@ -1543,19 +1779,36 @@ async def _handle_summary_generation(message: str, conv_id: str, file_context: O
         logger.error(f"Summary generation failed: {e}")
         return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
 
-async def _handle_diagnostic_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+async def _handle_diagnostic_generation(
+    message: str,
+    conv_id: str,
+    file_context: Optional[str],
+    explanation_level: ExplanationLevel,
+    study_focus: Optional[str] = None,
+) -> Dict:
     """Diagnostic = PDF-grounded mixed-format assessment (multiple choice / true_false / fill_blank).
 
     Uses retrieval over the uploaded PDF chunks so questions are about the actual content,
     not generic placeholders. Returns a payload the frontend renders via DiagnosticComponent.
     """
     try:
-        topic = _extract_topic_from_message(
-            message, ["diagnostic assessment", "run a diagnostic", "run diagnostic", "diagnostic",
-                     "assess my knowledge", "test my knowledge", "knowledge test"]
+        topic = _apply_study_focus_topic(
+            _extract_topic_from_message(
+                message,
+                [
+                    "diagnostic assessment",
+                    "run a diagnostic",
+                    "run diagnostic",
+                    "diagnostic",
+                    "assess my knowledge",
+                    "test my knowledge",
+                    "knowledge test",
+                    "readiness check",
+                ],
+            ),
+            study_focus,
+            "this material",
         )
-        if not topic or not topic.strip():
-            topic = "this material"
 
         # Retrieval: use the strongest representative content (summary + top chunks)
         retrieval = ""
