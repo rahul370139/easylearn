@@ -24,12 +24,9 @@ interface ApiResponse<T = any> {
 
 async function apiCall<T = any>(endpoint: string, options: RequestInit = {}): Promise<T> {
   try {
-    if (!API_BASE_URL) {
-      throw new Error(
-        "Missing NEXT_PUBLIC_API_BASE_URL. Set it in Vercel (Production + Preview) to your public backend URL (https://api.yourdomain.com or http://YOUR_VPS_IP:8000).",
-      )
-    }
-
+    // If API_BASE_URL is empty, we call same-origin endpoints.
+    // This is useful on Vercel with Next.js rewrites proxying `/api/*` and `/health` to the backend,
+    // and avoids browser mixed-content/CORS issues when the backend is only available over plain HTTP.
     const url = `${API_BASE_URL}${endpoint}`
     const response = await fetch(url, {
       headers: {
