@@ -12,9 +12,29 @@ function normalizeApiBaseUrl(raw: string | undefined): string {
   return trimmed
 }
 
-const API_BASE_URL =
-  normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL) ||
-  (process.env.NODE_ENV === "development" ? "http://127.0.0.1:8000" : "")
+function getApiBaseUrl(): string {
+  const fromEnv = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_BASE_URL)
+
+  // In production on Vercel the site is served over HTTPS.
+  // If the backend is only available over plain HTTP (e.g. VPS IP:8000),
+  // direct browser calls will be blocked as mixed content.
+  // In that case we rely on Next.js rewrites and call same-origin paths.
+  if (typeof window !== "undefined") {
+    if (window.location.protocol === "https:" && fromEnv.startsWith("http://")) {
+      return ""
+    }
+  }
+
+  if (fromEnv) return fromEnv
+  if (process.env.NODE_ENV === "development") return "http://127.0.0.1:8000"
+  return ""
+}
+
+const API_BASE_URL = getApiBaseUrl()
+
+function urlFor(pathWithLeadingSlash: string): string {
+  return API_BASE_URL ? `${API_BASE_URL}${pathWithLeadingSlash}` : pathWithLeadingSlash
+}
 
 interface ApiResponse<T = any> {
   data?: T
@@ -27,7 +47,7 @@ async function apiCall<T = any>(endpoint: string, options: RequestInit = {}): Pr
     // If API_BASE_URL is empty, we call same-origin endpoints.
     // This is useful on Vercel with Next.js rewrites proxying `/api/*` and `/health` to the backend,
     // and avoids browser mixed-content/CORS issues when the backend is only available over plain HTTP.
-    const url = `${API_BASE_URL}${endpoint}`
+    const url = urlFor(endpoint)
     const response = await fetch(url, {
       headers: {
         "Content-Type": "application/json",
@@ -63,7 +83,8 @@ export const learnAPI = {
     const formData = new FormData()
     formData.append("file", file)
 
-    return fetch(`${API_BASE_URL}/api/distill?owner_id=${ownerId}`, {
+    const url = urlFor(`/api/distill?owner_id=${encodeURIComponent(ownerId)}`)
+    return fetch(url, {
       method: "POST",
       body: formData,
     }).then((res) => {
@@ -324,7 +345,9 @@ export const chatAPI = {
     formData.append("file", file)
     if (conversationId) formData.append("conversation_id", conversationId)
 
-    const url = `${API_BASE_URL}/api/chat/upload?user_id=${encodeURIComponent(userId)}${explanationLevel ? `&explanation_level=${encodeURIComponent(explanationLevel)}` : ""}`
+    const url = urlFor(
+      `/api/chat/upload?user_id=${encodeURIComponent(userId)}${explanationLevel ? `&explanation_level=${encodeURIComponent(explanationLevel)}` : ""}`,
+    )
 
     return fetch(url, {
       method: "POST",

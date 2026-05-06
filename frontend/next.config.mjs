@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
-const apiBase = (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/+$/, "")
+// Use a server-side env var for the backend target so we can proxy HTTP backends
+// without exposing the URL to the browser (and without triggering mixed content).
+const apiBase = (process.env.API_PROXY_TARGET || process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/+$/, "")
 
 const nextConfig = {
   eslint: {
