@@ -22,7 +22,6 @@ import {
   Clock,
   Award,
   Target,
-  Users,
   Sparkles,
 } from "lucide-react"
 import { useAuth } from "@/components/auth-provider"
@@ -493,21 +492,6 @@ export default function CareerPage() {
                 <p>
                   <span className="font-medium text-foreground">3. Get</span> a skill-gap analysis, 3-stage
                   roadmap, 90-day plan, projects, and interview prep — all anchored to O*NET data.
-                </p>
-              </CardContent>
-            </Card>
-
-            <Card className="border-0 shadow-lg">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-lg">
-                  <Users className="h-5 w-5" />
-                  Why no skills tab?
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <p className="text-sm text-muted-foreground">
-                  Skills come straight from your resume. Click ✕ on any skill we miscategorised; everything
-                  else flows into the gap analysis automatically.
                 </p>
               </CardContent>
             </Card>

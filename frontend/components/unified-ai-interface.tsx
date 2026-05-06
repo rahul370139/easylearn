@@ -669,12 +669,34 @@ export function UnifiedAIInterface({
       }
 
       const parsedData = parseAPIResponse(data)
+      const fallbackType = (() => {
+        if (action.id === "diagnostic") return "diagnostic" as const
+        if (action.id === "quiz") return "quiz" as const
+        if (action.id === "lesson") return "lesson" as const
+        return null
+      })()
+      const patchedParsedData: Partial<Message> =
+        parsedData.type === "text" && fallbackType
+          ? {
+              ...parsedData,
+              type: fallbackType,
+              ...(fallbackType === "lesson"
+                ? { lessonData: data.lesson_data || data.lesson || data.response || "" }
+                : {
+                    quizData:
+                      (Array.isArray(data.quiz) && data.quiz) ||
+                      (Array.isArray(data.questions) && data.questions) ||
+                      (data.quiz_data && Array.isArray(data.quiz_data.questions) && data.quiz_data.questions) ||
+                      parseQuizFromText(data.response || ""),
+                  }),
+            }
+          : parsedData
       const aiMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: parsedData.content || "Response received",
+        content: patchedParsedData.content || "Response received",
         sender: "ai",
         timestamp: new Date(),
-        ...parsedData,
+        ...patchedParsedData,
       }
       setMessages((prev) => [...prev, aiMessage])
     } catch (error) {

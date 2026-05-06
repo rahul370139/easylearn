@@ -410,8 +410,7 @@ export function ResumeCareerUpgrade() {
       )}
 
       {/* Step 3 — target + interests + generate */}
-      {parsed && (
-        <Card>
+      <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Target className="h-5 w-5" />
@@ -419,6 +418,7 @@ export function ResumeCareerUpgrade() {
             </CardTitle>
             <CardDescription>
               We'll match this against the O*NET / BLS dataset and build a tailored plan.
+              {!parsed ? " Upload and parse a resume first, then generate the plan." : ""}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -484,15 +484,14 @@ export function ResumeCareerUpgrade() {
 
             <Button
               onClick={handleBuildPlan}
-              disabled={!targetRole || building}
+              disabled={!parsed || !targetRole || building}
               className="w-full bg-gradient-to-r from-blue-600 to-purple-600"
             >
               {building ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
               {building ? "Building plan…" : "Build my upgrade plan"}
             </Button>
           </CardContent>
-        </Card>
-      )}
+      </Card>
 
       {/* Plan output */}
       {plan && <PlanView plan={plan} userName={parsed?.name ?? null} />}
