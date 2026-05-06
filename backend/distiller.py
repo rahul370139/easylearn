@@ -981,8 +981,13 @@ def _detect_learning_intent(message_lower: str) -> Optional[str]:
         "create lesson", "generate lesson", "make lesson", "lesson about", "create microlearning",
         "create a lesson", "make a lesson", "study plan", "learning plan", "course outline",
         "syllabus for", "teach me about", "micro lesson", "learning path for", "module on",
+        "lesson plan", "learning objectives", "study module", "teach this topic",
     )
     if any(p in message_lower for p in lesson_phrases):
+        return "lesson"
+    if "lesson" in message_lower and any(
+        p in message_lower for p in ("plan", "objective", "outline", "module", "structured")
+    ):
         return "lesson"
 
     quiz_phrases = (
@@ -992,6 +997,10 @@ def _detect_learning_intent(message_lower: str) -> Optional[str]:
         "test questions", "question bank", "drill me", "test me on",
     )
     if any(p in message_lower for p in quiz_phrases):
+        return "quiz"
+    if "quiz" in message_lower and any(
+        p in message_lower for p in ("interactive", "questions", "multiple choice", "mcq")
+    ):
         return "quiz"
     if any(
         p in message_lower
