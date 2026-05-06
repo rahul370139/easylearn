@@ -2,7 +2,9 @@ import { NextRequest, NextResponse } from "next/server"
 
 function getBackendBaseUrl(): string {
   const raw = process.env.API_PROXY_TARGET || process.env.NEXT_PUBLIC_API_BASE_URL || ""
-  return raw.trim().replace(/\/+$/, "")
+  const cleaned = raw.trim().replace(/\/+$/, "")
+  // Accept either "https://host" or "https://host/api" in env config.
+  return cleaned.replace(/\/api$/i, "")
 }
 
 async function proxyToBackend(request: NextRequest, path: string[]): Promise<NextResponse> {
