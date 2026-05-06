@@ -12,6 +12,29 @@ Monorepo for the TrainPI / SkillSpring project.
 - **`backend/scripts/`**: offline / maintenance scripts (not imported by the API runtime)
 - **Root deploy configs**: `Procfile`, `render.yaml`
 
+## Deploy frontend (Vercel) — monorepo note
+
+Your old SkillSpring repo likely had `package.json` at the **repository root**, so Vercel auto-detected Next.js.
+
+This repo is a monorepo: Next.js lives in **`frontend/`**, so Vercel must be pointed there.
+
+### Vercel project settings (required)
+
+In **Vercel → Project → Settings → General**:
+
+- **Root Directory**: `TrainPI/frontend` (or `frontend` if your Git repo root is already `TrainPI/`)
+- **Framework Preset**: Next.js (auto)
+- **Install Command**: `pnpm install --frozen-lockfile` (or leave default if you’re not using pnpm on Vercel)
+- **Build Command**: `pnpm build` (or `next build`)
+
+### Vercel environment variables (required)
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `NEXT_PUBLIC_API_BASE_URL` (your public backend URL, ideally `https://...`)
+
+After changing Root Directory, trigger a **Redeploy**.
+
 ### What the main backend modules do (high level)
 
 - **`backend/main.py`**: FastAPI app + HTTP routes
