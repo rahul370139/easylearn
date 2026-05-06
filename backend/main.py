@@ -5,7 +5,7 @@ comprehensive API server with enhanced career guidance, learning management,
 and AI-powered features.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Form, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 import asyncio, tempfile, os, json
@@ -31,31 +31,23 @@ from distiller import (
     get_conversation_history, get_user_conversations,
     get_side_menu_data, update_explanation_level, update_framework_preference
 )
-from study_agent import (
-    SummarizerAgent, DiagnosticAgent, AgentRouter
-)
-from learn_tools import (
-    ingest_pdf, gen_flashcards, gen_quiz
-)
-from validators import (
-    qa_flashcards, qa_quiz
-)
-from repairs import (
-    repair_flashcards, repair_quiz
-)
 from mastery import (
-    get_mastery
+    get_mastery, update_mastery
 )
 from supabase_helper import (
     insert_lesson, insert_cards, insert_concept_map, mark_lesson_completed,
     get_user_completed_lessons, upsert_user_role, get_user_role,
     get_lessons_by_framework, get_user_progress_stats,
-    get_lesson_summary, get_lesson_cards, get_lesson_concept_map, get_lesson_by_id,
-    get_lesson_full_text
+    get_lesson_summary, get_lesson_by_id, get_lesson_full_text,
 )
 from career_matcher import matcher
 from unified_career_system import unified_career_system
 from dashboard import dashboard_system
+from resume_career import (
+    parse_resume as resume_parse,
+    build_career_plan as resume_build_plan,
+    upgrade_from_pdf as resume_upgrade,
+)
 from dotenv import load_dotenv
 from typing import Optional, Dict, List
 from datetime import datetime
@@ -93,9 +85,6 @@ async def get_role_based_recommendations(user_id: str, role: str, experience_lev
 
 app = FastAPI(title="TrainPi Microlearning API")
 
-# Initialize global agent router
-router = AgentRouter()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -127,27 +116,35 @@ async def test_endpoint():
 
 @app.get("/api/debug/lesson/{lesson_id}")
 async def debug_lesson_content(lesson_id: int):
-    """Debug endpoint to test lesson content generation"""
+    """Lightweight debug endpoint: reports what we have stored for a lesson.
+
+    Lookups are read-only from Supabase + the in-memory `lesson_store` cache.
+    No content is generated here — generation happens via the chat path so we
+    don't have two diverging code paths producing different output.
+    """
     try:
-        # Test all lesson actions
-        summary = await _generate_summary_on_demand(lesson_id)
-        quiz = await _generate_quiz_on_demand(lesson_id)
-        flashcards = await _generate_flashcards_on_demand(lesson_id)
-        workflow = await _generate_workflow_on_demand(lesson_id)
-        lesson = await _generate_lesson_on_demand(lesson_id)
-        
+        from distiller import get_lesson_cache
+        cached = get_lesson_cache(str(lesson_id)) or {}
+
+        lesson_data = get_lesson_by_id(lesson_id) or {}
+        summary = get_lesson_summary(lesson_id) or cached.get("summary") or ""
+        bullets = [b.strip() for b in summary.split("•") if b.strip()] if summary else []
+
+        flashcards = cached.get("flashcards") or []
+        quiz = cached.get("quiz") or []
+
         return {
             "lesson_id": lesson_id,
-            "summary_count": len(summary),
-            "quiz_count": len(quiz),
+            "title": lesson_data.get("title") or cached.get("title"),
+            "framework": lesson_data.get("framework") or cached.get("framework"),
+            "summary_count": len(bullets),
             "flashcards_count": len(flashcards),
-            "workflow_count": len(workflow),
-            "lesson_title": lesson.get("title", "Unknown"),
-            "summary_preview": summary[:2] if summary else [],
-            "quiz_preview": quiz[:1] if quiz else [],
-            "flashcards_preview": flashcards[:1] if flashcards else [],
-            "workflow_preview": workflow[:2] if workflow else [],
-            "status": "All content generated successfully"
+            "quiz_count": len(quiz),
+            "summary_preview": bullets[:2],
+            "flashcards_preview": flashcards[:1],
+            "quiz_preview": quiz[:1],
+            "has_chunks": bool(cached.get("chunks")),
+            "has_embeddings": bool(cached.get("chunk_embeddings")),
         }
     except Exception as e:
         logger.error(f"Debug lesson content failed: {e}")
@@ -255,246 +252,13 @@ async def distill_pdf(
             except:
                 pass
 
-@app.get("/api/lesson/{lesson_id}/{action}")
-async def lesson_action(lesson_id: int, action: str):
-    """Handle different lesson actions like summary, quiz, etc."""
-    try:
-        if action == "summary":
-            # 1) Prefer in-memory cache populated during upload
-            try:
-                from distiller import get_lesson_cache
-                cached = get_lesson_cache(str(lesson_id)) or {}
-                if cached.get("bullets"):
-                    return {"content": cached.get("bullets")}
-            except Exception:
-                pass
-            # 2) Then Supabase
-            summary = get_lesson_summary(lesson_id)
-            if summary:
-                bullets = [b.strip() for b in summary.split("•") if b.strip()]
-                return {"content": bullets}
-            # 3) Finally, generate on-demand
-            logger.info(f"Summary not found for lesson {lesson_id}, generating on-demand")
-            summary_content = await _generate_summary_on_demand(lesson_id)
-            try:
-                from distiller import set_lesson_cache
-                cached = cached if isinstance(cached, dict) else {}
-                cached["bullets"] = summary_content
-                set_lesson_cache(str(lesson_id), cached)
-            except Exception:
-                pass
-            return {"content": summary_content}
-        
-        elif action == "quiz":
-            # 1) Prefer in-memory cache
-            try:
-                from distiller import get_lesson_cache
-                cached = get_lesson_cache(str(lesson_id)) or {}
-                if cached.get("quiz"):
-                    return {"content": {"questions": cached.get("quiz")}}
-            except Exception:
-                pass
-            # 2) Supabase
-            quiz_cards = get_lesson_cards(lesson_id, "quiz")
-            if quiz_cards:
-                questions = [card["payload"] for card in quiz_cards]
-                return {"content": {"questions": questions}}
-            # 3) On-demand
-            logger.info(f"Quiz not found for lesson {lesson_id}, generating on-demand")
-            quiz_content = await _generate_quiz_on_demand(lesson_id)
-            try:
-                from distiller import set_lesson_cache
-                cached = cached if isinstance(cached, dict) else {}
-                cached["quiz"] = quiz_content
-                set_lesson_cache(str(lesson_id), cached)
-            except Exception:
-                pass
-            return {"content": {"questions": quiz_content}}
-        
-        elif action == "flashcards":
-            # 1) Prefer in-memory cache
-            try:
-                from distiller import get_lesson_cache
-                cached = get_lesson_cache(str(lesson_id)) or {}
-                if cached.get("flashcards"):
-                    return {"content": {"cards": cached.get("flashcards")}}
-            except Exception:
-                pass
-            # 2) Supabase
-            flashcard_cards = get_lesson_cards(lesson_id, "flashcard")
-            if flashcard_cards:
-                cards = [card["payload"] for card in flashcard_cards]
-                return {"content": {"cards": cards}}
-            # 3) On-demand
-            logger.info(f"Flashcards not found for lesson {lesson_id}, generating on-demand")
-            flashcard_content = await _generate_flashcards_on_demand(lesson_id)
-            try:
-                from distiller import set_lesson_cache
-                cached = cached if isinstance(cached, dict) else {}
-                cached["flashcards"] = flashcard_content
-                set_lesson_cache(str(lesson_id), cached)
-            except Exception:
-                pass
-            return {"content": {"cards": flashcard_content}}
-        
-        elif action == "lesson":
-            # 1) Prefer in-memory cache
-            try:
-                from distiller import get_lesson_cache
-                cached = get_lesson_cache(str(lesson_id)) or {}
-            except Exception:
-                cached = {}
-            # 2) Supabase lesson data
-            lesson_data = get_lesson_by_id(lesson_id) or {}
-            # bullets
-            bullets = []
-            if cached.get("bullets"):
-                bullets = cached.get("bullets")
-            else:
-                bullet_cards = get_lesson_cards(lesson_id, "bullet")
-                bullets = [card.get("payload", {}).get("text") for card in bullet_cards if card.get("payload", {}).get("text")]
-            # concept map
-            concept_map = cached.get("concept_map") or get_lesson_concept_map(lesson_id)
-            framework_value = (lesson_data.get("framework") if isinstance(lesson_data, dict) else None) or cached.get("framework") or "generic"
-            # Retrieval-based lesson plan
-            try:
-                from distiller import generate_retrieval_based_lesson_plan_for_lesson
-                lesson_plan = await generate_retrieval_based_lesson_plan_for_lesson(lesson_id, ExplanationLevel.INTERN, framework_value)
-            except Exception:
-                lesson_plan = {"title": "Learning Plan", "learning_topics": [], "learning_path": []}
-            # Title and summary
-            title = (lesson_data.get("title") if isinstance(lesson_data, dict) else None) or cached.get("title") or "Untitled Lesson"
-            summary_val = (lesson_data.get("summary") if isinstance(lesson_data, dict) else None) or cached.get("summary") or ""
-            content = {
-                "title": title,
-                "summary": summary_val,
-                "framework": framework_value,
-                "bullets": bullets,
-                "concept_map": concept_map,
-                "lesson_plan": lesson_plan
-            }
-            # Save plan in cache
-            try:
-                from distiller import set_lesson_cache
-                tmp = cached if isinstance(cached, dict) else {}
-                tmp["lesson_plan"] = lesson_plan
-                set_lesson_cache(str(lesson_id), tmp)
-            except Exception:
-                pass
-            return {"content": content}
-        
-        elif action == "workflow":
-            # For workflow, we'll generate a simple workflow from the concept map
-            concept_map = get_lesson_concept_map(lesson_id)
-            if concept_map and concept_map.get("nodes"):
-                workflow_steps = [node.get("title", "Step") for node in concept_map["nodes"]]
-                return {"content": {"workflow": workflow_steps}}
-            else:
-                # Generate workflow on-demand if not found in Supabase
-                logger.info(f"Workflow not found in Supabase for lesson {lesson_id}, generating on-demand")
-                workflow_content = await _generate_workflow_on_demand(lesson_id)
-                try:
-                    from distiller import get_lesson_cache, set_lesson_cache
-                    cached = get_lesson_cache(str(lesson_id)) or {}
-                    cached["workflow"] = workflow_content
-                    set_lesson_cache(str(lesson_id), cached)
-                except Exception:
-                    pass
-                return {"content": {"workflow": workflow_content}}
-        
-        else:
-            raise HTTPException(400, f"Unknown action: {action}")
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Lesson action failed: {e}")
-        raise HTTPException(500, f"Failed to get {action} for lesson {lesson_id}")
-
-@app.post("/api/lesson/{lesson_id}/{action}")
-async def lesson_action_post(lesson_id: int, action: str):
-    """POST endpoint for lesson actions - alternative to GET"""
-    return await lesson_action(lesson_id, action)
-
-@app.post("/api/chat/lesson/summary")
-async def get_lesson_summary_chat(lesson_id: int, user_id: str):
-    """Get lesson summary for chat integration"""
-    try:
-        summary = get_lesson_summary(lesson_id)
-        if summary:
-            bullets = [b.strip() for b in summary.split("•") if b.strip()]
-            return {"content": bullets}
-        else:
-            # Generate summary on-demand for chat
-            summary_content = await _generate_summary_on_demand(lesson_id)
-            return {"content": summary_content}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Lesson summary chat failed: {e}")
-        raise HTTPException(500, f"Failed to get summary for lesson {lesson_id}")
-
-@app.get("/api/chat/lesson/{lesson_id}/content")
-async def get_lesson_content_for_chat(lesson_id: int, user_id: Optional[str] = None):
-    """Get comprehensive lesson content for AI chatbot access"""
-    try:
-        # Prefer in-memory cache first (populated on upload)
-        try:
-            from distiller import lesson_store
-        except Exception:
-            lesson_store = {}
-
-        from distiller import get_lesson_cache
-        cached = get_lesson_cache(str(lesson_id))
-
-        # Get lesson data
-        lesson_data = get_lesson_by_id(lesson_id) or cached
-        summary = get_lesson_summary(lesson_id) or (cached.get("summary") if cached else None)
-        
-        # Generate content on-demand if not available
-        if not summary:
-            summary_bullets = await _generate_summary_on_demand(lesson_id)
-        else:
-            summary_bullets = [b.strip() for b in summary.split("•") if b.strip()]
-        
-        # Get quiz content
-        quiz_cards = get_lesson_cards(lesson_id, "quiz")
-        if quiz_cards:
-            quiz_questions = [card["payload"] for card in quiz_cards]
-        elif cached and cached.get("quiz"):
-            quiz_questions = cached.get("quiz")
-        else:
-            quiz_questions = await _generate_quiz_on_demand(lesson_id)
-        
-        # Get flashcard content
-        flashcard_cards = get_lesson_cards(lesson_id, "flashcard")
-        if flashcard_cards:
-            flashcards = [card["payload"] for card in flashcard_cards]
-        elif cached and cached.get("flashcards"):
-            flashcards = cached.get("flashcards")
-        else:
-            flashcards = await _generate_flashcards_on_demand(lesson_id)
-        
-        # Get workflow content
-        workflow_content = await _generate_workflow_on_demand(lesson_id)
-        
-        # Get concept map
-        concept_map = get_lesson_concept_map(lesson_id) or (cached.get("concept_map") if cached else None) or _generate_fallback_concept_map()
-        
-        return {
-            "lesson_id": lesson_id,
-            "title": (lesson_data.get("title") if isinstance(lesson_data, dict) else None) or "API Development Fundamentals",
-            "summary": summary_bullets,
-            "quiz": quiz_questions,
-            "flashcards": flashcards,
-            "workflow": workflow_content,
-            "concept_map": concept_map,
-            "message": f"I can see you've uploaded a PDF that has been processed into a comprehensive lesson. Here's what I can help you with: {len(summary_bullets)} key points, {len(quiz_questions)} quiz questions, {len(flashcards)} flashcards, and a detailed workflow with {len(workflow_content)} steps. What would you like to learn about?"
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get lesson content for chat: {e}")
-        raise HTTPException(500, f"Failed to get lesson content for chat")
+# NOTE: previously this section exposed `/api/lesson/{id}/{action}` (GET/POST),
+# `/api/chat/lesson/summary`, and `/api/chat/lesson/{id}/content`.
+# Those returned hardcoded "API Development" fallbacks when Supabase rows were
+# missing and were never reached by the live frontend (the chat path covers all
+# Quick Actions). They have been removed. The single source of truth for content
+# generation is now `process_chat_message` in distiller.py, which routes by
+# intent and grounds outputs in the uploaded PDF chunks.
 
 @app.post("/api/chat/ingest-distilled")
 async def ingest_distilled_lesson(
@@ -694,26 +458,6 @@ async def update_user_framework_preference(user_id: str, framework: str):
         logger.error(f"Failed to update framework preference: {e}")
         raise HTTPException(500, "Failed to update framework preference")
 
-
-# Missing helper functions from app.py
-def _generate_fallback_concept_map() -> Dict:
-    """Generate impressive fallback concept map"""
-    return {
-        "nodes": [
-            {"id": "1", "title": "API Design", "type": "concept"},
-            {"id": "2", "title": "Security", "type": "concept"},
-            {"id": "3", "title": "Performance", "type": "concept"},
-            {"id": "4", "title": "Testing", "type": "concept"},
-            {"id": "5", "title": "Deployment", "type": "concept"}
-        ],
-        "edges": [
-            {"source": "1", "target": "2", "label": "requires"},
-            {"source": "1", "target": "3", "label": "affects"},
-            {"source": "2", "target": "4", "label": "validated by"},
-            {"source": "3", "target": "5", "label": "optimized for"},
-            {"source": "4", "target": "5", "label": "ensures quality"}
-        ]
-    }
 
 # Career matching endpoints
 @app.get("/api/career/quiz", response_model=CareerQuizResponse)
@@ -1447,6 +1191,90 @@ async def generate_comprehensive_career_plan(request: ComprehensiveCareerPlanReq
 
 
 
+# ---------------------------------------------------------------------------
+# Resume-driven career upgrade
+# ---------------------------------------------------------------------------
+# Three endpoints, each step is independently usable so the frontend can show
+# progressive results (parsed skills auto-fill before the user clicks "build plan").
+
+@app.post("/api/career/resume/parse")
+async def parse_resume_endpoint(file: UploadFile = File(...)):
+    """Parse a resume PDF into a structured profile (skills, experience, projects)."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "PDF only")
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.write(await file.read())
+    tmp.close()
+    try:
+        parsed = await resume_parse(Path(tmp.name))
+        return {"resume": parsed}
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Resume parse failed: {e}")
+        raise HTTPException(500, "Failed to parse resume")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
+@app.post("/api/career/plan/build")
+async def build_resume_plan_endpoint(payload: Dict = None):
+    """Build a tailored skill-gap + roadmap + 90-day plan from a parsed resume.
+
+    Body: {
+        resume: <object returned by /api/career/resume/parse>,
+        target_role: str,
+        interests: [str]
+    }
+    """
+    if not payload or not isinstance(payload, dict):
+        raise HTTPException(400, "Body must be JSON with `resume`, `target_role`, `interests`.")
+
+    resume = payload.get("resume") or {}
+    target_role = (payload.get("target_role") or "").strip()
+    interests = payload.get("interests") or []
+    if not target_role:
+        raise HTTPException(400, "`target_role` is required.")
+
+    try:
+        return await resume_build_plan(resume, target_role, interests)
+    except Exception as e:
+        logger.error(f"Career plan build failed: {e}")
+        raise HTTPException(500, "Failed to build career plan")
+
+
+@app.post("/api/career/upgrade")
+async def career_upgrade_endpoint(
+    target_role: str = Query(..., description="Target career role"),
+    interests: str = Query("", description="Comma-separated interests"),
+    file: UploadFile = File(...),
+):
+    """One-shot: upload resume + target_role + interests → full upgrade payload."""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "PDF only")
+
+    interest_list = [i.strip() for i in interests.split(",") if i.strip()]
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp.write(await file.read())
+    tmp.close()
+    try:
+        return await resume_upgrade(Path(tmp.name), target_role, interest_list)
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        logger.error(f"Career upgrade failed: {e}")
+        raise HTTPException(500, "Failed to run career upgrade")
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+
+
 # Unified Career System Endpoints
 @app.post("/api/career/roadmap/unified", response_model=UnifiedRoadmapResponse)
 async def generate_unified_roadmap(request: UnifiedRoadmapRequest):
@@ -1558,265 +1386,6 @@ async def get_dashboard_achievements(user_id: str):
         logger.error(f"Error getting dashboard achievements: {e}")
         raise HTTPException(500, "Failed to get achievements")
 
-async def _generate_quiz_on_demand(lesson_id: int) -> List[Dict]:
-    """Generate quiz questions on-demand when Supabase data is not available"""
-    try:
-        # Prefer cached summary and retrieval context for better quality (same as chat)
-        retrieval = ""
-        cached_summary = None
-        try:
-            from distiller import get_lesson_cache, generate_content_embedding, find_similar_content
-            cached = get_lesson_cache(str(lesson_id)) or {}
-            chunks = cached.get("chunks") or []
-            embeds = cached.get("chunk_embeddings") or []
-            cached_summary = cached.get("summary")
-            if chunks and embeds:
-                # Build retrieval using summary text as query
-                q = cached_summary or "Generate quiz from the lesson"
-                q_embed = await generate_content_embedding(q)
-                sims = find_similar_content(q_embed, embeds, top_k=6)
-                top_indices = [i for i, _ in sims]
-                top_texts = [chunks[i] for i in top_indices if i < len(chunks)]
-                retrieval = "\n\n".join(top_texts)
-        except Exception:
-            pass
-
-        # Get lesson summary (fallback to Supabase if not in cache)
-        summary = cached_summary or get_lesson_summary(lesson_id)
-        if not summary:
-            return _generate_fallback_quiz()
-
-        from distiller import gen_flashcards_quiz, ExplanationLevel
-        quiz_data = await gen_flashcards_quiz(summary, ExplanationLevel.INTERN, retrieval_context=retrieval)
-        return quiz_data.get("quiz", _generate_fallback_quiz())
-        
-    except Exception as e:
-        logger.error(f"Failed to generate quiz on-demand: {e}")
-        return _generate_fallback_quiz()
-
-async def _generate_flashcards_on_demand(lesson_id: int) -> List[Dict]:
-    """Generate flashcards on-demand when Supabase data is not available"""
-    try:
-        # Prefer cached summary and retrieval context for better quality (same as chat)
-        retrieval = ""
-        cached_summary = None
-        try:
-            from distiller import get_lesson_cache, generate_content_embedding, find_similar_content
-            cached = get_lesson_cache(str(lesson_id)) or {}
-            chunks = cached.get("chunks") or []
-            embeds = cached.get("chunk_embeddings") or []
-            cached_summary = cached.get("summary")
-            if chunks and embeds:
-                q = cached_summary or "Create flashcards from the lesson"
-                q_embed = await generate_content_embedding(q)
-                sims = find_similar_content(q_embed, embeds, top_k=6)
-                top_indices = [i for i, _ in sims]
-                top_texts = [chunks[i] for i in top_indices if i < len(chunks)]
-                retrieval = "\n\n".join(top_texts)
-        except Exception:
-            pass
-
-        # Get lesson summary (fallback to Supabase if not in cache)
-        summary = cached_summary or get_lesson_summary(lesson_id)
-        if not summary:
-            return _generate_fallback_flashcards()
-
-        from distiller import gen_flashcards_quiz, ExplanationLevel
-        flashcard_data = await gen_flashcards_quiz(summary, ExplanationLevel.INTERN, retrieval_context=retrieval)
-        return flashcard_data.get("flashcards", _generate_fallback_flashcards())
-        
-    except Exception as e:
-        logger.error(f"Failed to generate flashcards on-demand: {e}")
-        return _generate_fallback_flashcards()
-
-def _generate_fallback_quiz() -> List[Dict]:
-    """Generate sophisticated fallback quiz questions"""
-    return [
-        {
-            "question": "What is the primary purpose of API design?",
-            "options": [
-                "To make code run faster",
-                "To provide a clear interface for data exchange",
-                "To reduce file sizes",
-                "To add more colors to the UI"
-            ],
-            "answer": "b"
-        },
-        {
-            "question": "Which of the following is a best practice for error handling?",
-            "options": [
-                "Ignore all errors",
-                "Use try-catch blocks appropriately",
-                "Always use global error handlers",
-                "Never handle errors"
-            ],
-            "answer": "b"
-        },
-        {
-            "question": "What does REST stand for in RESTful APIs?",
-            "options": [
-                "Remote Execution System Transfer",
-                "Representational State Transfer",
-                "Real-time Event Streaming Technology",
-                "Rapid Endpoint Service Transfer"
-            ],
-            "answer": "b"
-        },
-        {
-            "question": "Which HTTP method is typically used for creating new resources?",
-            "options": [
-                "GET",
-                "POST",
-                "PUT",
-                "DELETE"
-            ],
-            "answer": "b"
-        },
-        {
-            "question": "What is the purpose of middleware in web applications?",
-            "options": [
-                "To make the app slower",
-                "To process requests before they reach the main handler",
-                "To only handle database operations",
-                "To replace the main application logic"
-            ],
-            "answer": "b"
-        }
-    ]
-
-def _generate_fallback_flashcards() -> List[Dict]:
-    """Generate sophisticated fallback flashcards"""
-    return [
-        {
-            "front": "What is an API?",
-            "back": "An Application Programming Interface (API) is a set of rules and protocols that allows different software applications to communicate with each other."
-        },
-        {
-            "front": "What is the difference between GET and POST?",
-            "back": "GET requests retrieve data and are idempotent, while POST requests submit data and may change server state."
-        },
-        {
-            "front": "What is error handling?",
-            "back": "Error handling is the process of anticipating, detecting, and resolving programming, application, or communication errors."
-        },
-        {
-            "front": "What is middleware?",
-            "back": "Middleware is software that acts as a bridge between different applications, allowing them to communicate and share data."
-        },
-        {
-            "front": "What is a RESTful API?",
-            "back": "A RESTful API follows REST principles, using HTTP methods to perform CRUD operations on resources in a stateless manner."
-        }
-    ]
-
-async def _generate_summary_on_demand(lesson_id: int) -> List[str]:
-    """Generate impressive summary on-demand when Supabase data is not available"""
-    try:
-        # Try to get summary from Supabase first
-        summary = get_lesson_summary(lesson_id)
-        if summary:
-            bullets = [b.strip() for b in summary.split("•") if b.strip()]
-            return bullets
-        
-        # Generate sophisticated fallback summary
-        return _generate_fallback_summary()
-        
-    except Exception as e:
-        logger.error(f"Failed to generate summary on-demand: {e}")
-        return _generate_fallback_summary()
-
-async def _generate_lesson_on_demand(lesson_id: int) -> Dict:
-    """Generate impressive lesson content on-demand when Supabase data is not available"""
-    try:
-        # Try to get lesson data from Supabase first
-        lesson_data = get_lesson_by_id(lesson_id)
-        if lesson_data:
-            return {
-                "title": lesson_data.get("title", "API Development Fundamentals"),
-                "summary": lesson_data.get("summary", ""),
-                "framework": lesson_data.get("framework", "generic"),
-                "bullets": await _generate_summary_on_demand(lesson_id),
-                "concept_map": get_lesson_concept_map(lesson_id) or _generate_fallback_concept_map()
-            }
-        
-        # Generate sophisticated fallback lesson content
-        return _generate_fallback_lesson()
-        
-    except Exception as e:
-        logger.error(f"Failed to generate lesson on-demand: {e}")
-        return _generate_fallback_lesson()
-
-async def _generate_workflow_on_demand(lesson_id: int) -> List[str]:
-    """Generate impressive workflow on-demand when Supabase data is not available"""
-    try:
-        # Try to get concept map from Supabase first
-        concept_map = get_lesson_concept_map(lesson_id)
-        if concept_map and concept_map.get("nodes"):
-            workflow_steps = [node.get("title") or node.get("label") or "Step" for node in concept_map["nodes"]]
-            return workflow_steps
-        
-        # Generate sophisticated fallback workflow
-        return _generate_fallback_workflow()
-        
-    except Exception as e:
-        logger.error(f"Failed to generate workflow on-demand: {e}")
-        return _generate_fallback_workflow()
-
-def _generate_fallback_summary() -> List[str]:
-    """Generate impressive fallback summary"""
-    return [
-        "🎯 **API Design Principles**: Understand RESTful architecture, HTTP methods, and resource modeling",
-        "🔧 **Error Handling**: Implement robust try-catch blocks, proper status codes, and meaningful error messages",
-        "🛡️ **Security Best Practices**: Use authentication, authorization, input validation, and HTTPS",
-        "📊 **Data Validation**: Implement request/response validation, type checking, and sanitization",
-        "⚡ **Performance Optimization**: Use caching, pagination, compression, and efficient database queries",
-        "🔍 **Testing Strategies**: Unit tests, integration tests, API testing, and automated CI/CD pipelines",
-        "📚 **Documentation**: Create comprehensive API docs with examples, schemas, and usage guidelines",
-        "🔄 **Versioning**: Implement API versioning strategies for backward compatibility"
-    ]
-
-def _generate_fallback_lesson() -> Dict:
-    """Generate impressive fallback lesson content"""
-    return {
-        "title": "🚀 Advanced API Development Mastery",
-        "summary": "Comprehensive guide to building robust, scalable, and production-ready APIs",
-        "framework": "generic",
-        "bullets": _generate_fallback_summary(),
-        "concept_map": _generate_fallback_concept_map()
-    }
-
-def _generate_fallback_workflow() -> List[str]:
-    """Generate impressive fallback workflow"""
-    return [
-        "📋 **1. Planning & Design**: Define API requirements, endpoints, and data models",
-        "🏗️ **2. Architecture Setup**: Choose framework, database, and deployment strategy",
-        "🔧 **3. Core Development**: Implement endpoints, validation, and business logic",
-        "🛡️ **4. Security Implementation**: Add authentication, authorization, and input validation",
-        "🧪 **5. Testing & Quality**: Write unit tests, integration tests, and API documentation",
-        "📊 **6. Performance Optimization**: Implement caching, pagination, and monitoring",
-        "🚀 **7. Deployment & CI/CD**: Set up automated deployment and continuous integration",
-        "📈 **8. Monitoring & Maintenance**: Monitor performance, handle errors, and iterate improvements"
-    ]
-
-def _generate_fallback_concept_map() -> Dict:
-    """Generate impressive fallback concept map"""
-    return {
-        "nodes": [
-            {"id": "1", "title": "API Design", "type": "concept"},
-            {"id": "2", "title": "Security", "type": "concept"},
-            {"id": "3", "title": "Performance", "type": "concept"},
-            {"id": "4", "title": "Testing", "type": "concept"},
-            {"id": "5", "title": "Deployment", "type": "concept"}
-        ],
-        "edges": [
-            {"source": "1", "target": "2", "label": "requires"},
-            {"source": "1", "target": "3", "label": "affects"},
-            {"source": "2", "target": "4", "label": "validated by"},
-            {"source": "3", "target": "5", "label": "optimized for"},
-            {"source": "4", "target": "5", "label": "ensures quality"}
-        ]
-    }
-
 # Micro-lessons utilities
 _MICRO_LESSONS_CACHE: Optional[List[Dict]] = None
 
@@ -1884,177 +1453,12 @@ def _get_micro_lessons_for_framework(framework_value: str, limit: int = 6) -> Li
 
 
 # ============================================================================
-# AGENTIC AI ENDPOINTS
+# MASTERY ENDPOINT
 # ============================================================================
-
-@app.post("/api/ingest/pdf")
-async def ingest_pdf_endpoint(
-    user_id: str = Form(...),
-    file: UploadFile = File(...)
-):
-    """Ingest a PDF document for processing by the agentic system"""
-    try:
-        # Validate file type
-        if not file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
-        
-        # Read file bytes
-        file_bytes = await file.read()
-        
-        # Create temporary file for processing
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_file:
-            temp_file.write(file_bytes)
-            temp_file_path = temp_file.name
-        
-        try:
-            # Ingest PDF using agentic system
-            result = await ingest_pdf(temp_file_path, user_id)
-            
-            if result.get("error"):
-                raise HTTPException(status_code=500, detail=result["error"])
-            
-            return {
-                "pdf_id": result["pdf_id"],
-                "status": "success"
-            }
-            
-        finally:
-            # Clean up temporary file
-            os.unlink(temp_file_path)
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"PDF ingestion failed: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF ingestion failed: {str(e)}")
-
-@app.post("/api/agent/route")
-async def route_agent(req: dict):
-    """Detect intent and return next steps."""
-    try:
-        message = req.get("message", "")
-        pdf_id = req.get("pdf_id")
-        pdf_present = bool(pdf_id)
-        
-        intent_info = router.detect_intent(message, pdf_present=pdf_present)
-        return intent_info
-        
-    except Exception as e:
-        logger.error(f"Agent routing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Agent routing failed: {str(e)}")
-
-@app.post("/api/agent/summary")
-async def summary_agent(req: dict):
-    """Generate structured summary using SummarizerAgent"""
-    try:
-        pdf_id = req["pdf_id"]
-        user_id = req["user_id"]
-        topic = req.get("topic", "")
-        
-        agent = SummarizerAgent(pdf_id, user_id, topic)
-        result = await agent.run()
-        return result
-        
-    except Exception as e:
-        logger.error(f"Summary generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Summary generation failed: {str(e)}")
-
-@app.post("/api/agent/flashcards")
-async def flashcards_agent(req: dict):
-    """Generate validated flashcards using the agentic system"""
-    try:
-        pdf_id = req["pdf_id"]
-        topic = req.get("topic", "")
-        num = req.get("num", 8)
-        
-        cards = await gen_flashcards(pdf_id, topic, num)
-        if not qa_flashcards(cards):
-            cards = await repair_flashcards(cards, pdf_id, topic, num)
-        return {"flashcards": cards}
-        
-    except Exception as e:
-        logger.error(f"Flashcard generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Flashcard generation failed: {str(e)}")
-
-@app.post("/api/agent/quiz")
-async def quiz_agent(req: dict):
-    """Generate MCQ quiz using the agentic system"""
-    try:
-        pdf_id = req["pdf_id"]
-        topic = req.get("topic", "")
-        num = req.get("num", 8)
-        
-        quiz = await gen_quiz(pdf_id, topic, num)
-        if not qa_quiz(quiz):
-            quiz = await repair_quiz(quiz, pdf_id, topic, num)
-        return {"quiz": quiz}
-        
-    except Exception as e:
-        logger.error(f"Quiz generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
-
-@app.post("/api/agent/diagnostic")
-async def diagnostic_agent(req: dict):
-    """Run full diagnostic cycle using DiagnosticAgent"""
-    try:
-        pdf_id = req["pdf_id"]
-        user_id = req["user_id"]
-        topic = req.get("topic", "")
-        num = req.get("num", 10)
-        
-        agent = DiagnosticAgent(pdf_id, user_id, topic)
-        result = await agent.run(num_questions=num)
-        return result
-        
-    except Exception as e:
-        logger.error(f"Diagnostic generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Diagnostic generation failed: {str(e)}")
-
-@app.post("/api/agent/diagnostic/results")
-async def agent_diagnostic_results_endpoint(
-    request: Request
-):
-    """Process diagnostic results and update mastery scores"""
-    try:
-        logger.debug(f"Diagnostic results endpoint called")
-        
-        # Parse JSON body
-        body = await request.json()
-        logger.debug(f"Parsed request body: {body}")
-        
-        pdf_id = body.get("pdf_id")
-        user_id = body.get("user_id")
-        topic = body.get("topic", "")
-        user_answers = body.get("user_answers", [])
-        session_id = body.get("session_id")
-        
-        logger.debug(f"Extracted parameters: pdf_id={pdf_id}, user_id={user_id}, topic={topic}, user_answers={user_answers}, session_id={session_id}")
-        
-        if not pdf_id or not user_id or not user_answers:
-            raise HTTPException(status_code=400, detail="pdf_id, user_id, and user_answers are required")
-        
-        # Initialize DiagnosticAgent
-        agent = DiagnosticAgent(pdf_id, user_id, topic)
-        if session_id:
-            agent.session_id = session_id
-        
-        # Process results
-        results = await agent.process_results(user_answers)
-        
-        if results.get("error"):
-            raise HTTPException(status_code=500, detail=results["error"])
-        
-        return {
-            "status": "success",
-            "results": results,
-            "message": "Diagnostic results processed successfully"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Diagnostic results processing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Diagnostic results processing failed: {str(e)}")
+# Note: previously this section also held /api/agent/* and /api/generate/* endpoints.
+# Those returned placeholder/templated content and were never reached from the
+# frontend (the chat path in /api/chat covers all quick actions). They have been
+# removed. Mastery is kept because the dashboard reads it.
 
 @app.get("/api/agent/mastery/{user_id}")
 async def get_user_mastery_endpoint(
@@ -2064,229 +1468,90 @@ async def get_user_mastery_endpoint(
     """Get user mastery scores for topics"""
     try:
         mastery_data = get_mastery(user_id)
-        
+
         return {
             "status": "success",
             "mastery": mastery_data,
             "message": "Mastery data retrieved successfully"
         }
-        
+
     except Exception as e:
         logger.error(f"Mastery retrieval failed: {e}")
         raise HTTPException(status_code=500, detail=f"Mastery retrieval failed: {str(e)}")
 
-@app.post("/api/agent/workflow")
-async def workflow_agent(req: dict):
-    """Generate learning workflow using the agentic system"""
-    try:
-        pdf_id = req["pdf_id"]
-        topic = req.get("topic", "")
-        num_steps = req.get("num_steps", 5)
-        
-        # Generate workflow steps
-        workflow_steps = []
-        for i in range(num_steps):
-            step = {
-                "step": i + 1,
-                "action": f"Learning step {i + 1}",
-                "description": f"Complete learning activity {i + 1} for {topic or 'the topic'}",
-                "estimated_time": "5-10 minutes",
-                "resources": ["Study materials", "Practice exercises"]
-            }
-            workflow_steps.append(step)
-        
-        workflow_response = {
-            "workflow": workflow_steps,
-            "total_steps": num_steps,
-            "estimated_duration": f"{num_steps * 10} minutes",
-            "difficulty_level": "Intermediate"
-        }
-        
-        return workflow_response
-        
-    except Exception as e:
-        logger.error(f"Workflow generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Workflow generation failed: {str(e)}")
 
-@app.post("/api/generate/workflow")
-async def generate_workflow_endpoint(req: dict):
-    """Frontend-friendly workflow generation endpoint"""
-    try:
-        content = req.get("content", "")
-        topic = req.get("topic", "")
-        num_steps = req.get("num_steps", 5)
-        
-        if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
-        
-        # Generate workflow steps
-        workflow_steps = []
-        for i in range(num_steps):
-            step = {
-                "step": i + 1,
-                "action": f"Learning step {i + 1}",
-                "description": f"Complete learning activity {i + 1} for {topic or 'the topic'}",
-                "estimated_time": "5-10 minutes",
-                "resources": ["Study materials", "Practice exercises"]
-            }
-            workflow_steps.append(step)
-        
-        return {
-            "workflow": workflow_steps,
-            "total_steps": num_steps,
-            "estimated_duration": f"{num_steps * 10} minutes",
-            "difficulty_level": "Intermediate"
-        }
-        
-    except Exception as e:
-        logger.error(f"Workflow generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Workflow generation failed: {str(e)}")
+@app.post("/api/agent/diagnostic/results")
+async def diagnostic_results_endpoint(request: Request):
+    """Persist diagnostic answers, update per-topic mastery, and return a breakdown.
 
-@app.post("/api/generate/quiz")
-async def generate_quiz_endpoint(req: dict):
-    """Frontend-friendly quiz generation endpoint"""
+    The frontend (result-components.tsx) sends `user_answers` with
+    `question_index`, `selected_answer`, `is_correct`, plus the original
+    `pdf_id`, `user_id`, `topic`, `session_id`. We compute per-topic accuracy
+    (the frontend supplies `topic` per question on the diagnostic payload from
+    distiller) and write mastery via `update_mastery`.
+    """
     try:
-        content = req.get("content", "")
-        topic = req.get("topic", "")
-        num_questions = req.get("num_questions", 5)
-        
-        if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
-        
-        # For now, return a sample quiz structure
-        # In production, this would call your actual quiz generation logic
-        quiz_questions = []
-        for i in range(num_questions):
-            question = {
-                "id": i + 1,
-                "question": f"Sample question {i + 1} about {topic or 'the topic'}?",
-                "options": [
-                    f"Option A for question {i + 1}",
-                    f"Option B for question {i + 1}",
-                    f"Option C for question {i + 1}",
-                    f"Option D for question {i + 1}"
-                ],
-                "answer_idx": 0,
-                "explanation": f"This is the correct answer for question {i + 1}"
-            }
-            quiz_questions.append(question)
-        
-        return {
-            "quiz": quiz_questions,
-            "total_questions": num_questions,
-            "topic": topic or "General"
-        }
-        
-    except Exception as e:
-        logger.error(f"Quiz generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
+        body = await request.json()
+        user_id = body.get("user_id")
+        topic = (body.get("topic") or "general").strip() or "general"
+        user_answers = body.get("user_answers") or []
+        questions = body.get("questions") or []
 
-@app.post("/api/generate/flashcards")
-async def generate_flashcards_endpoint(req: dict):
-    """Frontend-friendly flashcard generation endpoint"""
-    try:
-        content = req.get("content", "")
-        topic = req.get("topic", "")
-        num_cards = req.get("num_cards", 5)
-        
-        if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
-        
-        # For now, return a sample flashcard structure
-        # In production, this would call your actual flashcard generation logic
-        flashcards = []
-        for i in range(num_cards):
-            card = {
-                "id": i + 1,
-                "front": f"Front of flashcard {i + 1}",
-                "back": f"Back of flashcard {i + 1} with answer",
-                "topic": topic or "General",
-                "difficulty": "Medium"
-            }
-            flashcards.append(card)
-        
-        return {
-            "flashcards": flashcards,
-            "total_cards": num_cards,
-            "topic": topic or "General"
-        }
-        
-    except Exception as e:
-        logger.error(f"Flashcard generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Flashcard generation failed: {str(e)}")
+        if not user_id or not isinstance(user_answers, list) or not user_answers:
+            raise HTTPException(status_code=400, detail="user_id and user_answers are required")
 
-@app.post("/api/generate/lesson")
-async def generate_lesson_endpoint(req: dict):
-    """Frontend-friendly lesson generation endpoint"""
-    try:
-        content = req.get("content", "")
-        topic = req.get("topic", "")
-        
-        if not content:
-            raise HTTPException(status_code=400, detail="Content is required")
-        
-        # For now, return a sample lesson structure
-        # In production, this would call your actual lesson generation logic
-        lesson = {
-            "title": f"Lesson on {topic or 'the topic'}",
-            "summary": f"This is a comprehensive lesson about {topic or 'the topic'}",
-            "key_points": [
-                f"Key point 1 about {topic or 'the topic'}",
-                f"Key point 2 about {topic or 'the topic'}",
-                f"Key point 3 about {topic or 'the topic'}"
-            ],
-            "estimated_duration": "15-20 minutes",
-            "difficulty": "Intermediate"
-        }
-        
-        return {
-            "lesson": lesson,
-            "topic": topic or "General"
-        }
-        
-    except Exception as e:
-        logger.error(f"Lesson generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Lesson generation failed: {str(e)}")
+        total = len(user_answers)
+        correct = sum(1 for a in user_answers if a.get("is_correct"))
+        overall_pct = round((correct / total) * 100) if total else 0
 
-@app.get("/api/agent/test")
-async def test_agent_system():
-    """Test endpoint to verify agent system is working"""
-    try:
-        # Test intent detection
-        test_message = "I want a summary"
-        intent_result = router.detect_intent(test_message, pdf_present=True)
-        
-        # Test mastery function
-        test_user_id = "test_user_123"
-        mastery_result = get_mastery(test_user_id)
-        
+        # Per-topic accuracy (only computable when frontend includes per-question topics)
+        topic_correct: Dict[str, int] = {}
+        topic_total: Dict[str, int] = {}
+        for idx, ans in enumerate(user_answers):
+            q = questions[idx] if idx < len(questions) else {}
+            t = (q.get("topic") if isinstance(q, dict) else None) or topic
+            topic_total[t] = topic_total.get(t, 0) + 1
+            if ans.get("is_correct"):
+                topic_correct[t] = topic_correct.get(t, 0) + 1
+        topic_scores = {t: round(topic_correct.get(t, 0) / max(topic_total[t], 1), 3) for t in topic_total}
+
+        # Update mastery store (0..1 scale)
+        try:
+            update_mastery(user_id, {topic: overall_pct / 100.0, **topic_scores})
+        except Exception as e:
+            logger.warning(f"Mastery update soft-failed: {e}")
+
+        weak_areas = [t for t, s in topic_scores.items() if s < 0.6]
+        strong_areas = [t for t, s in topic_scores.items() if s >= 0.8]
+        recommendations = [f"Review the section on {t}" for t in weak_areas[:5]] or [
+            "Solid performance — try a harder document or a related topic next.",
+        ]
+        next_steps = [
+            "Generate flashcards on the weakest topic",
+            "Re-take the diagnostic in a few days to confirm retention",
+        ]
+
         return {
             "status": "success",
-            "message": "Agent system is working correctly",
-            "tests": {
-                "intent_detection": intent_result,
-                "mastery_retrieval": {
-                    "user_id": test_user_id,
-                    "result": mastery_result
-                }
+            "results": {
+                "results": {
+                    "overall_score": overall_pct,
+                    "weak_areas": weak_areas,
+                    "strong_areas": strong_areas,
+                    "improvement_potential": max(0, 100 - overall_pct),
+                },
+                "remediation": {"recommendations": recommendations},
+                "mastery_update": {"topic_scores": topic_scores},
+                "next_steps": next_steps,
             },
-            "endpoints_available": [
-                "/api/agent/route",
-                "/api/agent/summary", 
-                "/api/agent/flashcards",
-                "/api/agent/quiz",
-                "/api/agent/diagnostic",
-                "/api/agent/workflow",
-                "/api/generate/workflow",
-                "/api/generate/quiz",
-                "/api/generate/flashcards",
-                "/api/generate/lesson"
-            ]
+            "message": "Diagnostic results processed successfully",
         }
-        
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Agent system test failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Agent system test failed: {str(e)}")
+        logger.error(f"Diagnostic results processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Diagnostic results processing failed: {str(e)}")
 
 
 

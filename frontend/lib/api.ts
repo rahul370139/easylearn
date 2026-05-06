@@ -77,6 +77,13 @@ export const healthAPI = {
 }
 
 // Learn Page Endpoints
+//
+// Quick action content generation (summary / lesson / quiz / flashcards /
+// workflow / diagnostic) deliberately does NOT live here. Those flow through
+// `chatAPI.sendMessage`, which the backend routes by intent in
+// `process_chat_message`. Keeping a single path avoids two diverging
+// generators and the hardcoded "API Development" placeholders we used to
+// have on the per-lesson endpoints.
 export const learnAPI = {
   // PDF Processing & Lesson Management
   distill: (file: File, ownerId: string) => {
@@ -92,23 +99,6 @@ export const learnAPI = {
       return res.json()
     })
   },
-
-  getLessonContent: (lessonId: string, action: string) => apiCall<any>(`/api/lesson/${lessonId}/${action}`),
-
-  generateLessonContent: (lessonId: string, action: string, data: any) =>
-    apiCall<any>(`/api/lesson/${lessonId}/${action}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  getLessonSummary: (data: any) =>
-    apiCall<any>("/api/chat/lesson/summary", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  getLessonContentForChat: (lessonId: string, userId: string) =>
-    apiCall<any>(`/api/chat/lesson/${lessonId}/content?user_id=${encodeURIComponent(userId)}`),
 
   // Framework & Skills
   getFrameworks: () => apiCall<string[]>("/api/frameworks"),
@@ -137,45 +127,6 @@ export const learnAPI = {
   getCompletedLessons: (userId: string) => apiCall<any[]>(`/api/users/${userId}/completed-lessons`),
 
   getUserProgress: (userId: string) => apiCall<any>(`/api/users/${userId}/progress`),
-
-  // File upload for learn page
-  uploadFile: async (file: File) => {
-    try {
-      const formData = new FormData()
-      formData.append("file", file)
-
-      return await apiCall("/api/learn/upload", {
-        method: "POST",
-        body: formData,
-        headers: {}, // Let browser set Content-Type for FormData
-      })
-    } catch (error) {
-      console.warn("File upload API failed")
-      return { success: false, error: "Upload failed" }
-    }
-  },
-
-  // Chat functionality for learn page
-  chat: async (data: {
-    message: string
-    user_id: string
-    file_id?: string
-    experience_level?: string
-    framework_focus?: string
-  }) => {
-    try {
-      return await apiCall("/api/learn/chat", {
-        method: "POST",
-        body: JSON.stringify(data),
-      })
-    } catch (error) {
-      console.warn("Chat API failed, using fallback response")
-      return {
-        response: "I'm currently experiencing technical difficulties. Please try again later.",
-        type: "text",
-      }
-    }
-  },
 }
 
 // Career Page Endpoints
@@ -329,6 +280,37 @@ export const careerAPI = {
 
   // Career Sessions
   getUserCareerSessions: (userId: string) => apiCall<any[]>(`/api/career/sessions/${userId}`),
+
+  // Resume-driven career upgrade.
+  // Step 1 — parse PDF: returns structured profile (skills, experience, projects).
+  parseResume: (file: File) => {
+    const formData = new FormData()
+    formData.append("file", file)
+    const url = urlFor("/api/career/resume/parse")
+    return fetch(url, { method: "POST", body: formData }).then((res) => {
+      if (!res.ok) throw new Error(`Resume parse failed: ${res.status}`)
+      return res.json() as Promise<{ resume: any }>
+    })
+  },
+
+  // Step 2 — given parsed resume + target role + interests, build the plan.
+  buildPlan: (data: { resume: any; target_role: string; interests: string[] }) =>
+    apiCall<any>("/api/career/plan/build", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  // One-shot: upload resume and get full upgrade payload (parsed + plan).
+  upgrade: (file: File, target_role: string, interests: string[]) => {
+    const formData = new FormData()
+    formData.append("file", file)
+    const qs = new URLSearchParams({ target_role, interests: interests.join(",") })
+    const url = urlFor(`/api/career/upgrade?${qs.toString()}`)
+    return fetch(url, { method: "POST", body: formData }).then((res) => {
+      if (!res.ok) throw new Error(`Career upgrade failed: ${res.status}`)
+      return res.json()
+    })
+  },
 }
 
 // Chat Page Endpoints
@@ -385,83 +367,15 @@ export const chatAPI = {
     }),
 }
 
-// Agentic AI Endpoints
+// Mastery & Diagnostic Result Endpoints
+// Note: previously this object exposed many `/api/agent/*` and `/api/generate/*`
+// wrappers. Those endpoints were placeholder/unreachable and have been removed
+// from the backend. All "quick action" content generation (summary, lesson,
+// quiz, flashcards, workflow, diagnostic) now flows through `chatAPI.sendMessage`
+// which the backend routes by intent in `process_chat_message`.
 export const agenticAPI = {
-  // Intent Detection & Routing
-  routeMessage: (data: { message: string; pdf_id?: string; user_id?: string }) =>
-    apiCall<{
-      intent: string
-      confidence: number
-      message: string
-      context: any
-      suggestions?: string[]
-    }>("/api/agent/route", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  // Summary Agent
-  generateSummary: (data: { pdf_id: string; user_id: string; topic?: string }) =>
-    apiCall<{
-      summary: string
-      concept_map: any
-      key_points: string[]
-      page_references: any
-    }>("/api/agent/summary", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  // Diagnostic Agent
-  startDiagnostic: (data: { pdf_id: string; user_id: string; topic?: string; num?: number }) =>
-    apiCall<{
-      questions: Array<{
-        id: string
-        question: string
-        options: string[]
-        answer_idx: number
-        topic: string
-        generated_at: string
-        fallback: boolean
-      }>
-      mastery_before: any
-      diagnostic_plan: any
-      session_id: string
-      created_at: string
-      adaptive: boolean
-    }>("/api/agent/diagnostic", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  processDiagnosticResults: (data: {
-    pdf_id: string
-    user_id: string
-    topic?: string
-    user_answers: Array<{
-      question_index: number
-      selected_answer: string
-      is_correct: boolean
-    }>
-    session_id: string
-  }) =>
-    apiCall<{
-      status: string
-      results: {
-        mastery_after: any
-        skill_gaps: string[]
-        recommendations: string[]
-        improvement_score: number
-        next_steps: string[]
-      }
-    }>("/api/agent/diagnostic/results", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  // Mastery Tracking - with proper error handling for anonymous users
+  // Mastery retrieval used by progress dashboards and the Learn header.
   getMastery: async (userId: string, topic?: string) => {
-    // Don't make API call for anonymous users
     if (!userId || userId === "anonymous-user" || userId === "anonymous") {
       return {
         status: "success",
@@ -488,7 +402,6 @@ export const agenticAPI = {
         }
       }>(url)
     } catch (error) {
-      // Return default mastery data if API fails
       console.warn("Failed to fetch mastery data, returning defaults:", error)
       return {
         status: "success",
@@ -503,124 +416,36 @@ export const agenticAPI = {
     }
   },
 
-  // Content Generation
-  generateWorkflow: (data: { pdf_id: string; user_id: string; topic?: string }) =>
-    apiCall<{
-      workflow: Array<{
-        step: number
-        action: string
-        description: string
-        estimated_time?: string
-        resources?: string[]
-      }>
-      total_steps: number
-      estimated_duration: string
-      difficulty_level: string
-    }>("/api/agent/workflow", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  generateFlashcards: (data: { pdf_id: string; user_id: string; topic?: string; num?: number }) =>
-    apiCall<{
-      flashcards: Array<{
-        front: string
-        back: string
-      }>
-      total_cards: number
-      difficulty_level: string
-    }>("/api/agent/flashcards", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  generateQuiz: (data: { pdf_id: string; user_id: string; topic?: string; num?: number }) =>
-    apiCall<{
-      questions: Array<{
-        question: string
-        options: string[]
-        correct_answer: string
-        explanation?: string
-      }>
-      total_questions: number
-      difficulty_level: string
-    }>("/api/agent/quiz", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  generateContent: async (data: {
-    pdf_id: string
+  // Submit diagnostic answers; backend updates mastery and returns a topic breakdown.
+  processDiagnosticResults: (data: {
+    pdf_id?: string
     user_id: string
-    content_type: "lesson" | "quiz" | "flashcards" | "workflow"
     topic?: string
-    difficulty?: string
-  }) => {
-    // Route to appropriate content generation endpoint
-    switch (data.content_type) {
-      case "quiz":
-        return agenticAPI.generateQuiz({
-          pdf_id: data.pdf_id,
-          user_id: data.user_id,
-          topic: data.topic,
-          num: 10,
-        })
-      case "flashcards":
-        return agenticAPI.generateFlashcards({
-          pdf_id: data.pdf_id,
-          user_id: data.user_id,
-          topic: data.topic,
-          num: 15,
-        })
-      case "workflow":
-        return agenticAPI.generateWorkflow({
-          pdf_id: data.pdf_id,
-          user_id: data.user_id,
-          topic: data.topic,
-        })
-      case "lesson":
-        // For lesson generation, we'll use the learn API
-        return learnAPI.generateLessonContent(data.pdf_id, "lesson", {
-          user_id: data.user_id,
-          difficulty: data.difficulty,
-          topic: data.topic,
-        })
-      default:
-        throw new Error(`Unsupported content type: ${data.content_type}`)
-    }
-  },
-
-  // System Testing
-  testSystem: () => apiCall<{ status: string; message: string }>("/api/agent/test"),
-
-  // Additional methods for agentic interface
-  detectIntent: async (data: { message: string; user_id: string }) => {
-    try {
-      return await apiCall("/api/agent/intent", {
-        method: "POST",
-        body: JSON.stringify(data),
-      })
-    } catch (error) {
-      return { intent: "general", confidence: 0.5 }
-    }
-  },
-
-  runDiagnostic: async (data: { topic: string; user_id: string }) => {
-    try {
-      return await apiCall("/api/agent/diagnostic", {
-        method: "POST",
-        body: JSON.stringify(data),
-      })
-    } catch (error) {
-      return {
-        diagnostic: {
-          strengths: ["Basic understanding"],
-          weaknesses: ["Advanced concepts"],
-          recommendations: ["Practice more examples"],
-        },
+    user_answers: Array<{
+      question_index: number
+      selected_answer: string
+      is_correct: boolean
+    }>
+    session_id?: string
+    questions?: Array<{ topic?: string }>
+  }) =>
+    apiCall<{
+      status: string
+      results: {
+        results: {
+          overall_score: number
+          weak_areas: string[]
+          strong_areas: string[]
+          improvement_potential: number
+        }
+        remediation: { recommendations: string[] }
+        mastery_update: { topic_scores: Record<string, number> }
+        next_steps: string[]
       }
-    }
-  },
+    }>("/api/agent/diagnostic/results", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 }
 
 // Dashboard Page Endpoints

@@ -1,6 +1,6 @@
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
-import io, os, json, asyncio
+import io, os, json, asyncio, re
 import fitz  # PyMuPDF
 from loguru import logger
 import httpx
@@ -918,7 +918,29 @@ async def process_chat_message(user_id: str, message: str, conversation_id: Opti
         conversation = conversation_store[conv_id]
         messages = conversation["messages"]
         file_context = conversation.get("file_context")
-        
+
+        # If the user has not uploaded a PDF for this conversation, fall back
+        # to the interview_prep knowledge base. This means asking
+        # "create a lesson about transformers" works even with no document
+        # loaded, with citations grounded in the KB rather than fabricated.
+        if not file_context:
+            try:
+                from rag_kb import retrieve_kb, format_kb_context
+                kb_matches = await retrieve_kb(message, top_k=6)
+                if kb_matches:
+                    kb_text = format_kb_context(kb_matches)
+                    if kb_text:
+                        file_context = kb_text
+                        # Cache for follow-up turns in this conversation so we
+                        # don't re-query the KB on every message.
+                        conversation_store[conv_id]["file_context"] = kb_text
+                        conversation_store[conv_id]["kb_sources"] = [
+                            {"doc": m.get("doc"), "section": m.get("section"), "similarity": m.get("similarity")}
+                            for m in kb_matches
+                        ]
+            except Exception as e:
+                logger.debug(f"KB retrieval skipped: {e}")
+
         # Check for special commands
         message_lower = message.lower().strip()
         
@@ -947,6 +969,12 @@ async def process_chat_message(user_id: str, message: str, conversation_id: Opti
             "create summary", "generate summary", "make summary", "summarize", "bullet points", "summary"
         ]):
             return await _handle_summary_generation(message, conv_id, file_context, explanation_level)
+
+        elif any(cmd in message_lower for cmd in [
+            "run a diagnostic", "diagnostic assessment", "run diagnostic", "diagnostic", "assess my knowledge",
+            "test my knowledge", "knowledge test"
+        ]):
+            return await _handle_diagnostic_generation(message, conv_id, file_context, explanation_level)
         
         elif any(cmd in message_lower for cmd in ["explain like 5", "explain like 15", "explain like senior", "explain for beginner", "explain for expert"]):
             return await _handle_explanation_level_change(message, conv_id, file_context, explanation_level)
@@ -1253,126 +1281,176 @@ You can also generate lessons, quizzes, and flashcards when asked."""
     }
 
 async def _handle_workflow_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
-    """Handle workflow/diagram generation command."""
+    """Generate a structured, retrieval-grounded workflow.
+
+    Earlier versions of this handler produced bland graphs ("Start → Process →
+    End") because the prompt asked for a workflow without grounding it in the
+    document. We now:
+      1. Pull the top retrieval chunks for the topic from this conversation.
+      2. Force the LLM to anchor every step in concrete concepts/tools that
+         appear in the source material (no placeholder "Tip 1" bullets).
+      3. Validate the JSON shape and provide a non-cosmetic fallback derived
+         from the document summary itself when the model misbehaves.
+    """
     try:
-        topic = _extract_topic_from_message(message, ["workflow about", "create workflow", "generate workflow", "make diagram", "create chart"])
-        
-        # Build the prompt without f-string to avoid brace issues
-        context_part = f"Use this context if relevant: {file_context}" if file_context else ""
-        
-        prompt = f"""
-        Create a comprehensive workflow/diagram for: {topic}
-        
-        {context_part}
-        
-        Explanation Level: {explanation_level.value}
-        
-        {get_explanation_prompt(explanation_level)}
-        
-        Create an engaging, visual workflow that includes:
-        - Clear process steps with decision points
-        - Visual flow diagram using Mermaid syntax
-        - Time estimates for each step
-        - Best practices and tips
-        - Error handling and alternative paths
-        
-        IMPORTANT: Generate a proper Mermaid diagram code that can be rendered as a visual flowchart.
-        Use different shapes for different types of steps (rectangles for processes, diamonds for decisions, etc.)
-        
-        Return ONLY valid JSON (no prose, no markdown) with this structure:
-        {{
-            "title": "Workflow Title",
-            "description": "Comprehensive workflow description",
-            "type": "flowchart|process|decision_tree|timeline|sequence",
-            "mermaid_code": "graph TD\\n    A[Start] --> B{{Decision?}}\\n    B -->|Yes| C[Process 1]\\n    B -->|No| D[Process 2]\\n    C --> E[End]\\n    D --> E",
-            "visual_elements": {{
-                "start_node": "green",
-                "process_nodes": "blue", 
-                "decision_nodes": "yellow",
-                "end_node": "red"
-            }},
-            "nodes": [
-                {{
-                    "id": "node1",
-                    "label": "Start",
-                    "type": "start",
-                    "description": "Initial step description",
-                    "duration": "5 minutes",
-                    "tips": ["Tip 1", "Tip 2"],
-                    "color": "green"
-                }},
-                {{
-                    "id": "node2",
-                    "label": "Process Step",
-                    "type": "process",
-                    "description": "Process step description",
-                    "duration": "10 minutes",
-                    "tips": ["Best practice 1", "Best practice 2"],
-                    "color": "blue"
-                }}
-            ],
-            "edges": [
-                {{
-                    "from": "node1",
-                    "to": "node2",
-                    "label": "Next",
-                    "condition": "When ready to proceed",
-                    "style": "solid"
-                }}
-            ],
-            "steps": [
-                {{
-                    "step": 1,
-                    "title": "Step Title",
-                    "description": "Detailed step description",
-                    "duration": "5 minutes",
-                    "best_practices": ["Practice 1", "Practice 2"],
-                    "common_mistakes": ["Mistake 1", "Mistake 2"],
-                    "error_handling": "What to do if this step fails"
-                }}
-            ],
-            "estimated_duration": "30-45 minutes",
-            "difficulty_level": "beginner|intermediate|advanced",
-            "prerequisites": ["Prerequisite 1", "Prerequisite 2"],
-            "tools_needed": ["Tool 1", "Tool 2"],
-            "alternative_paths": [
-                {{
-                    "condition": "If step fails",
-                    "action": "Alternative action",
-                    "description": "What to do instead"
-                }}
-            ]
-        }}
-        """
-        
-        messages = [{"role": "user", "content": prompt}]
-        response = await call_groq(messages)
-        parsed = _parse_json_safely(response)
-        workflow_data = parsed if isinstance(parsed, dict) else {
-            "title": f"Workflow: {topic}",
-            "description": "Generated workflow",
-            "type": "flowchart",
-            "mermaid_code": "graph TD\nA[Start]-->B[Process]-->C[End]",
-            "nodes": [],
-            "edges": [],
-            "steps": []
-        }
-        response_text = f"I've created a workflow for {topic}! Here's what I've prepared:\n\n**{workflow_data['title']}**\n{workflow_data['description']}"
-        
+        topic = _extract_topic_from_message(
+            message,
+            ["workflow about", "create workflow", "generate workflow", "make diagram", "create chart", "flowchart", "diagram"],
+        )
+        if not topic or not topic.strip():
+            topic = "the loaded material"
+
+        # Retrieval: same pattern as quiz/flashcards/diagnostic handlers
+        chunks = conversation_store.get(conv_id, {}).get("chunks", [])
+        embeds = conversation_store.get(conv_id, {}).get("chunk_embeddings", [])
+        retrieval = ""
+        if chunks and embeds:
+            try:
+                q_embed = await generate_content_embedding(topic)
+                sims = find_similar_content(q_embed, embeds, top_k=6)
+                top_indices = [i for i, _ in sims]
+                top_texts = [chunks[i] for i in top_indices if i < len(chunks)]
+                retrieval = "\n\n".join(top_texts)[:6000]
+            except Exception:
+                retrieval = ""
+
+        ground = retrieval or (file_context or "")[:6000]
+
+        prompt = (
+            f"You are designing a process workflow for: {topic}.\n"
+            f"{get_explanation_prompt(explanation_level)}\n\n"
+            "GROUND TRUTH (use these passages — do not invent steps that aren't supported here):\n"
+            "\"\"\"\n" + (ground or "(no document loaded — produce a credible domain workflow but keep terminology accurate)") + "\n\"\"\"\n\n"
+            "Return ONLY valid JSON (no prose, no markdown fences) with this exact shape:\n"
+            "{\n"
+            "  \"title\": str,                        // tied to the topic\n"
+            "  \"description\": str,                  // 1-2 sentences explaining the goal\n"
+            "  \"type\": \"flowchart\"|\"sequence\"|\"decision_tree\"|\"pipeline\",\n"
+            "  \"steps\": [                            // 6–10 steps minimum\n"
+            "    {\n"
+            "      \"step\": int,\n"
+            "      \"title\": str,                    // verb-led, 4-7 words, names a real artifact\n"
+            "      \"description\": str,              // 1-2 sentences grounded in the source\n"
+            "      \"inputs\": [str],                 // what this step needs\n"
+            "      \"outputs\": [str],                // what this step produces\n"
+            "      \"tools\": [str],                  // libraries / services / techniques\n"
+            "      \"duration\": str,                 // e.g. \"30 minutes\", \"1 sprint\"\n"
+            "      \"common_pitfalls\": [str],        // grounded, not generic\n"
+            "      \"decision\": str|null              // if this step branches, the branch question; else null\n"
+            "    }\n"
+            "  ],\n"
+            "  \"branches\": [                         // optional alternative paths\n"
+            "    { \"from_step\": int, \"condition\": str, \"action\": str }\n"
+            "  ],\n"
+            "  \"prerequisites\": [str],\n"
+            "  \"deliverable\": str,                   // what you ship at the end\n"
+            "  \"estimated_duration\": str,\n"
+            "  \"mermaid_code\": str                  // graph TD … with the steps as nodes; keep ids A,B,C…\n"
+            "}\n\n"
+            "Hard rules:\n"
+            "- NO placeholder text. Every field must be specific to the topic.\n"
+            "- common_pitfalls must reference real failure modes (e.g. 'forgetting to set CORS', not 'Mistake 1').\n"
+            "- mermaid_code must have one node per step (id A, B, C, …) with edges that match `branches`.\n"
+            "- If the source material is too thin for 6 steps, return as many honest steps as you can support."
+        )
+
+        raw = await call_groq([{"role": "user", "content": prompt}])
+        parsed = _parse_json_safely(raw)
+        workflow_data = parsed if isinstance(parsed, dict) else {}
+
+        # Validate / repair shape
+        steps = workflow_data.get("steps") if isinstance(workflow_data, dict) else None
+        if not isinstance(steps, list) or not steps:
+            workflow_data = _build_fallback_workflow_from_context(topic, ground)
+        else:
+            # Ensure mermaid_code exists; synthesize from steps if missing
+            if not workflow_data.get("mermaid_code"):
+                workflow_data["mermaid_code"] = _mermaid_from_steps(steps)
+            # Stable defaults for optional fields
+            workflow_data.setdefault("type", "flowchart")
+            workflow_data.setdefault("branches", [])
+            workflow_data.setdefault("prerequisites", [])
+            workflow_data.setdefault("estimated_duration", "")
+
+        title = workflow_data.get("title") or f"Workflow: {topic}"
+        description = workflow_data.get("description") or ""
+        response_text = f"I've created a workflow for {topic}.\n\n**{title}**\n{description}".strip()
+
         add_message_to_conversation(conv_id, "assistant", response_text)
-        
+
         return {
             "response": response_text,
             "conversation_id": conv_id,
             "message_id": str(uuid.uuid4()),
             "timestamp": datetime.utcnow().isoformat(),
             "workflow_data": workflow_data,
-            "type": "workflow"
+            "type": "workflow",
         }
-        
+
     except Exception as e:
         logger.error(f"Workflow generation failed: {e}")
         return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
+
+
+def _mermaid_from_steps(steps: List[Dict]) -> str:
+    """Build a minimal Mermaid `graph TD` from a list of step dicts."""
+    lines = ["graph TD"]
+    ids: List[str] = []
+    for i, s in enumerate(steps[:26]):  # A..Z
+        node_id = chr(ord("A") + i)
+        title = (s.get("title") or f"Step {i+1}").replace('"', "'")
+        lines.append(f'    {node_id}["{title}"]')
+        ids.append(node_id)
+    for i in range(len(ids) - 1):
+        lines.append(f"    {ids[i]} --> {ids[i+1]}")
+    return "\n".join(lines)
+
+
+def _build_fallback_workflow_from_context(topic: str, ground: str) -> Dict:
+    """Last-resort fallback: derive steps from the source bullets/sentences.
+
+    This is invoked only when the LLM produces no usable JSON at all. It still
+    grounds the workflow in the user's content (it doesn't invent generic
+    "Planning → Build → Deploy" boilerplate).
+    """
+    if not ground:
+        return {
+            "title": f"Workflow: {topic}",
+            "description": "We couldn't generate a detailed workflow from the available context. Try uploading a more detailed PDF or asking a more specific question.",
+            "type": "flowchart",
+            "steps": [],
+            "branches": [],
+            "prerequisites": [],
+            "estimated_duration": "",
+            "mermaid_code": "graph TD\n    A[\"Insufficient context\"]",
+        }
+    # Take up to 8 substantive sentences as steps
+    sentences = [s.strip(" •-—") for s in re.split(r"[\n.]+", ground) if len(s.strip()) > 30]
+    sentences = sentences[:8]
+    steps = []
+    for i, sent in enumerate(sentences, start=1):
+        title = sent[:60].rstrip(",") + ("…" if len(sent) > 60 else "")
+        steps.append({
+            "step": i,
+            "title": title,
+            "description": sent,
+            "inputs": [],
+            "outputs": [],
+            "tools": [],
+            "duration": "",
+            "common_pitfalls": [],
+            "decision": None,
+        })
+    return {
+        "title": f"Workflow: {topic}",
+        "description": "Step ordering derived from the source material because the model output was unusable.",
+        "type": "flowchart",
+        "steps": steps,
+        "branches": [],
+        "prerequisites": [],
+        "estimated_duration": "",
+        "mermaid_code": _mermaid_from_steps(steps),
+    }
 
 async def _handle_summary_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
     """Handle summary/bullet points generation command."""
@@ -1464,6 +1542,110 @@ async def _handle_summary_generation(message: str, conv_id: str, file_context: O
     except Exception as e:
         logger.error(f"Summary generation failed: {e}")
         return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
+
+async def _handle_diagnostic_generation(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
+    """Diagnostic = PDF-grounded mixed-format assessment (multiple choice / true_false / fill_blank).
+
+    Uses retrieval over the uploaded PDF chunks so questions are about the actual content,
+    not generic placeholders. Returns a payload the frontend renders via DiagnosticComponent.
+    """
+    try:
+        topic = _extract_topic_from_message(
+            message, ["diagnostic assessment", "run a diagnostic", "run diagnostic", "diagnostic",
+                     "assess my knowledge", "test my knowledge", "knowledge test"]
+        )
+        if not topic or not topic.strip():
+            topic = "this material"
+
+        # Retrieval: use the strongest representative content (summary + top chunks)
+        retrieval = ""
+        chunks = conversation_store.get(conv_id, {}).get("chunks", [])
+        embeds = conversation_store.get(conv_id, {}).get("chunk_embeddings", [])
+        if chunks and embeds:
+            try:
+                # Use file_context summary if available, else topic, as query for retrieval
+                query_text = (file_context or topic or "core concepts")[:1500]
+                q_embed = await generate_content_embedding(query_text)
+                sims = find_similar_content(q_embed, embeds, top_k=8)
+                top_indices = [i for i, _ in sims]
+                top_texts = [chunks[i] for i in top_indices if i < len(chunks)]
+                retrieval = "\n\n".join(top_texts)[:6000]
+            except Exception:
+                retrieval = ""
+
+        prompt = (
+            "Create a 10-question diagnostic assessment grounded ONLY in the provided document content. "
+            f"{get_explanation_prompt(explanation_level)}\n\n"
+            "Mix question types so we test recall, application, and analysis:\n"
+            "- 5 multiple_choice (4 distinct, plausible options)\n"
+            "- 3 true_false (options ['True','False'])\n"
+            "- 2 fill_blank (4 options where exactly one fits)\n\n"
+            f"Document content:\n{retrieval or file_context or '(No document loaded — write generic but realistic questions about ' + topic + ')'}\n\n"
+            "Return ONLY valid JSON (no prose, no markdown) with this structure:\n"
+            "{\n"
+            "  \"questions\": [\n"
+            "    {\n"
+            "      \"question\": str,\n"
+            "      \"options\": [str, ...],\n"
+            "      \"answer\": str,            // exact text of the correct option\n"
+            "      \"type\": \"multiple_choice\"|\"true_false\"|\"fill_blank\",\n"
+            "      \"topic\": str,             // short topic tag derived from the document\n"
+            "      \"explanation\": str         // 1-sentence explanation grounded in the document\n"
+            "    }\n"
+            "  ]\n"
+            "}"
+        )
+        raw = await call_groq([{"role": "user", "content": prompt}])
+        parsed = _parse_json_safely(raw) or {}
+        questions = parsed.get("questions", []) if isinstance(parsed, dict) else []
+
+        # Validate shape; fall back to PDF-grounded quiz if model misbehaves
+        if not isinstance(questions, list) or not questions:
+            try:
+                qa = await gen_flashcards_quiz(
+                    summary=(file_context or topic)[:4000],
+                    explanation_level=explanation_level,
+                    retrieval_context=retrieval,
+                    num_items=10,
+                )
+                questions = []
+                for q in qa.get("quiz", []):
+                    opts = q.get("options") or []
+                    answer_letter = (q.get("answer") or "").strip().upper()
+                    answer_text = ""
+                    if opts and answer_letter in {"A", "B", "C", "D"}:
+                        answer_text = opts[ord(answer_letter) - ord("A")] if len(opts) >= ord(answer_letter) - ord("A") + 1 else opts[0]
+                    questions.append({
+                        "question": q.get("question", ""),
+                        "options": opts,
+                        "answer": answer_text or (opts[0] if opts else ""),
+                        "type": "multiple_choice",
+                        "topic": topic,
+                        "explanation": "",
+                    })
+            except Exception:
+                questions = []
+
+        response_text = (
+            f"I've created a 10-question diagnostic on {topic}. Answer each one and submit to see how you did."
+        )
+        add_message_to_conversation(conv_id, "assistant", response_text)
+
+        return {
+            "response": response_text,
+            "conversation_id": conv_id,
+            "message_id": str(uuid.uuid4()),
+            "timestamp": datetime.utcnow().isoformat(),
+            "type": "diagnostic",
+            # Keep both keys so frontend can read whichever it prefers
+            "quiz": questions,
+            "questions": questions,
+        }
+
+    except Exception as e:
+        logger.error(f"Diagnostic generation failed: {e}")
+        return await _handle_regular_chat(message, conv_id, file_context, explanation_level)
+
 
 async def _handle_explanation_level_change(message: str, conv_id: str, file_context: Optional[str], explanation_level: ExplanationLevel) -> Dict:
     """Handle explanation level change command."""

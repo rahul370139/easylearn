@@ -1147,56 +1147,84 @@ export function SummaryComponent({ summary, keyPoints, onAction }: SummaryCompon
 }
 
 // Workflow Component
+//
+// Backend sends a structured `workflow_data` object (see distiller.py
+// `_handle_workflow_generation`). For backward compatibility we still accept a
+// plain string and parse it line-by-line. We deliberately do NOT fabricate a
+// "Start Learning → Read Content → Take Quiz" fallback any more — when the
+// backend can't ground a workflow we surface a clear empty state so the user
+// retries with a better prompt instead of seeing fake content.
+interface WorkflowStepData {
+  step?: number
+  title?: string
+  description?: string
+  inputs?: string[]
+  outputs?: string[]
+  tools?: string[]
+  duration?: string
+  common_pitfalls?: string[]
+  decision?: string | null
+  type?: string
+}
+
+interface WorkflowData {
+  title?: string
+  description?: string
+  type?: string
+  steps?: WorkflowStepData[]
+  branches?: Array<{ from_step: number; condition: string; action: string }>
+  prerequisites?: string[]
+  deliverable?: string
+  estimated_duration?: string
+  mermaid_code?: string
+}
+
 interface WorkflowComponentProps {
-  workflow: string
+  // Accepts either a JSON string of WorkflowData, a plain text fallback,
+  // or the raw structured object passed straight through.
+  workflow: string | WorkflowData
   onAction?: (action: string) => void
 }
 
 export function WorkflowComponent({ workflow, onAction }: WorkflowComponentProps) {
-  // Parse workflow content to extract steps and create visual diagram
-  const parseWorkflowContent = (content: string) => {
-    const lines = content.split('\n').filter(line => line.trim())
-    const steps: Array<{ id: string; title: string; description: string; type: 'start' | 'process' | 'decision' | 'end' }> = []
-    
-    let stepId = 1
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('*')) {
-        // Determine step type based on content
-        let type: 'start' | 'process' | 'decision' | 'end' = 'process'
-        if (trimmed.toLowerCase().includes('start') || trimmed.toLowerCase().includes('begin')) {
-          type = 'start'
-        } else if (trimmed.toLowerCase().includes('end') || trimmed.toLowerCase().includes('finish') || trimmed.toLowerCase().includes('complete')) {
-          type = 'end'
-        } else if (trimmed.toLowerCase().includes('?') || trimmed.toLowerCase().includes('choose') || trimmed.toLowerCase().includes('decide')) {
-          type = 'decision'
-        }
-        
-        steps.push({
-          id: `step-${stepId}`,
-          title: trimmed.length > 50 ? trimmed.substring(0, 50) + '...' : trimmed,
-          description: trimmed,
-          type
-        })
-        stepId++
-      }
-    }
-    
-    // If no steps found, create a default workflow
-    if (steps.length === 0) {
-      return [
-        { id: 'step-1', title: 'Start Learning', description: 'Begin your learning journey', type: 'start' as const },
-        { id: 'step-2', title: 'Read Content', description: 'Review the material thoroughly', type: 'process' as const },
-        { id: 'step-3', title: 'Take Quiz', description: 'Test your understanding', type: 'process' as const },
-        { id: 'step-4', title: 'Practice', description: 'Apply what you learned', type: 'process' as const },
-        { id: 'step-5', title: 'Complete', description: 'Finish the learning process', type: 'end' as const }
-      ]
-    }
-    
-    return steps
-  }
+  const data: WorkflowData = (() => {
+    if (typeof workflow !== "string") return workflow || {}
+    // Try JSON
+    try {
+      const parsed = JSON.parse(workflow)
+      if (parsed && typeof parsed === "object") return parsed as WorkflowData
+    } catch {}
+    // Fall back to line parsing — produce step titles only, no synthetic types.
+    const steps: WorkflowStepData[] = workflow
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .map((line, i) => ({
+        step: i + 1,
+        title: line.length > 80 ? line.slice(0, 80) + "…" : line,
+        description: line,
+      }))
+    return { steps, title: "Workflow", description: "" }
+  })()
 
-  const workflowSteps = parseWorkflowContent(workflow)
+  const workflowSteps = (data.steps || []).map((s, i) => ({
+    id: `step-${s.step ?? i + 1}`,
+    title: s.title || `Step ${i + 1}`,
+    description: s.description || "",
+    type: s.decision
+      ? ("decision" as const)
+      : i === 0
+        ? ("start" as const)
+        : i === (data.steps?.length || 1) - 1
+          ? ("end" as const)
+          : ("process" as const),
+    inputs: s.inputs,
+    outputs: s.outputs,
+    tools: s.tools,
+    duration: s.duration,
+    pitfalls: s.common_pitfalls,
+    decision: s.decision,
+  }))
 
   const getStepIcon = (type: string) => {
     switch (type) {
@@ -1224,13 +1252,32 @@ export function WorkflowComponent({ workflow, onAction }: WorkflowComponentProps
     }
   }
 
+  if (!workflowSteps.length) {
+    return (
+      <Card className="w-full max-w-3xl mx-auto">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Workflow className="h-5 w-5 text-indigo-600" />
+            {data.title || "Workflow"}
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            We couldn't build a grounded workflow from this material. Try uploading a more detailed PDF, or
+            ask a more specific question (e.g. "create a workflow for fine-tuning a Llama model").
+          </p>
+        </CardContent>
+      </Card>
+    )
+  }
+
   return (
     <Card className="w-full max-w-6xl mx-auto">
       <CardHeader>
         <CardTitle className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Workflow className="h-5 w-5 text-indigo-600" />
-            Learning Workflow
+            {data.title || "Workflow"}
           </div>
           <div className="flex gap-1">
             <Button variant="ghost" size="sm" onClick={() => onAction?.("copy")}>
@@ -1241,73 +1288,108 @@ export function WorkflowComponent({ workflow, onAction }: WorkflowComponentProps
             </Button>
           </div>
         </CardTitle>
+        {data.description && (
+          <p className="text-sm text-muted-foreground mt-1">{data.description}</p>
+        )}
+        {(data.estimated_duration || data.deliverable) && (
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            {data.estimated_duration && (
+              <Badge variant="outline">⏱ {data.estimated_duration}</Badge>
+            )}
+            {data.deliverable && <Badge variant="outline">🎯 {data.deliverable}</Badge>}
+          </div>
+        )}
       </CardHeader>
       <CardContent>
-        {/* Visual Workflow Diagram */}
-        <div className="relative">
-          <div className="flex flex-col items-center space-y-4">
-            {workflowSteps.map((step, index) => (
-              <div key={step.id} className="flex flex-col items-center">
-                {/* Step Box */}
-                <div className={`relative px-6 py-4 rounded-lg border-2 min-w-[200px] max-w-[300px] text-center ${getStepColor(step.type)}`}>
-                  <div className="flex items-center justify-center gap-2 mb-2">
-                    <span className="text-lg">{getStepIcon(step.type)}</span>
-                    <span className="font-semibold text-sm">{step.title}</span>
-                  </div>
-                  <div className="text-xs opacity-80">
-                    {step.description}
-                  </div>
-                  
-                  {/* Step Number */}
-                  <div className="absolute -top-2 -left-2 w-6 h-6 bg-indigo-600 text-white rounded-full flex items-center justify-center text-xs font-bold">
-                    {index + 1}
-                  </div>
+        {data.prerequisites && data.prerequisites.length > 0 && (
+          <div className="mb-4 p-3 rounded-lg bg-muted/40 text-sm">
+            <span className="font-medium">Prerequisites: </span>
+            {data.prerequisites.join(" · ")}
+          </div>
+        )}
+
+        {/* Vertical step list with rich detail */}
+        <div className="space-y-3">
+          {workflowSteps.map((step, index) => (
+            <div key={step.id} className="flex gap-3">
+              <div className="flex flex-col items-center">
+                <div
+                  className={`w-9 h-9 rounded-full border-2 flex items-center justify-center text-sm font-bold ${getStepColor(step.type)}`}
+                >
+                  {index + 1}
                 </div>
-                
-                {/* Arrow to next step */}
                 {index < workflowSteps.length - 1 && (
-                  <div className="flex flex-col items-center mt-2">
-                    <div className="w-0.5 h-6 bg-indigo-300 dark:bg-indigo-600"></div>
-                    <div className="w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-indigo-300 dark:border-t-indigo-600"></div>
+                  <div className="w-0.5 flex-1 bg-indigo-200 dark:bg-indigo-800 mt-1" />
+                )}
+              </div>
+              <div className={`flex-1 mb-2 rounded-lg border p-3 ${getStepColor(step.type)}`}>
+                <div className="flex items-center gap-2 mb-1">
+                  <span>{getStepIcon(step.type)}</span>
+                  <span className="font-semibold text-sm">{step.title}</span>
+                  {step.duration && (
+                    <Badge variant="outline" className="text-[10px] ml-auto">
+                      {step.duration}
+                    </Badge>
+                  )}
+                </div>
+                {step.description && (
+                  <p className="text-xs opacity-90 mb-2">{step.description}</p>
+                )}
+                {step.decision && (
+                  <p className="text-xs italic">↳ Decision: {step.decision}</p>
+                )}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-2 mt-2">
+                  {step.inputs && step.inputs.length > 0 && (
+                    <div className="text-xs">
+                      <span className="font-medium">Inputs: </span>
+                      {step.inputs.join(", ")}
+                    </div>
+                  )}
+                  {step.outputs && step.outputs.length > 0 && (
+                    <div className="text-xs">
+                      <span className="font-medium">Outputs: </span>
+                      {step.outputs.join(", ")}
+                    </div>
+                  )}
+                  {step.tools && step.tools.length > 0 && (
+                    <div className="text-xs">
+                      <span className="font-medium">Tools: </span>
+                      {step.tools.join(", ")}
+                    </div>
+                  )}
+                </div>
+                {step.pitfalls && step.pitfalls.length > 0 && (
+                  <div className="text-xs mt-2">
+                    <span className="font-medium">⚠ Common pitfalls: </span>
+                    {step.pitfalls.join("; ")}
                   </div>
                 )}
               </div>
-            ))}
-          </div>
+            </div>
+          ))}
         </div>
 
-        {/* Alternative Horizontal Layout for smaller screens */}
-        <div className="mt-8 lg:hidden">
-          <div className="text-sm font-medium text-muted-foreground mb-4 text-center">Mobile View</div>
-          <div className="space-y-3">
-            {workflowSteps.map((step, index) => (
-              <div key={`mobile-${step.id}`} className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-indigo-600 text-white rounded-full flex items-center justify-center text-sm font-bold shrink-0">
-                  {index + 1}
-                </div>
-                <div className={`flex-1 px-4 py-3 rounded-lg border ${getStepColor(step.type)}`}>
-                  <div className="flex items-center gap-2 mb-1">
-                    <span>{getStepIcon(step.type)}</span>
-                    <span className="font-semibold text-sm">{step.title}</span>
-                  </div>
-                  <div className="text-xs opacity-80">{step.description}</div>
-                </div>
-              </div>
-            ))}
+        {data.branches && data.branches.length > 0 && (
+          <div className="mt-4 p-3 rounded-lg bg-yellow-50 dark:bg-yellow-950/20 text-sm">
+            <p className="font-medium mb-1">Alternative paths</p>
+            <ul className="space-y-1 text-xs">
+              {data.branches.map((b, i) => (
+                <li key={i}>
+                  ↳ From step {b.from_step}, if <em>{b.condition}</em> → {b.action}
+                </li>
+              ))}
+            </ul>
           </div>
-        </div>
+        )}
 
-        {/* Workflow Summary */}
-        <div className="mt-6 p-4 bg-indigo-50 dark:bg-indigo-950/20 rounded-lg">
-          <div className="flex items-center gap-2 mb-2">
-            <Workflow className="h-4 w-4 text-indigo-600" />
-            <span className="font-medium text-sm">Workflow Summary</span>
-          </div>
-          <div className="text-sm text-muted-foreground">
-            This workflow contains <strong>{workflowSteps.length} steps</strong> to guide you through the learning process. 
-            Follow the steps in order for the best learning experience.
-          </div>
-        </div>
+        {data.mermaid_code && (
+          <details className="mt-4">
+            <summary className="text-xs text-muted-foreground cursor-pointer">View Mermaid source</summary>
+            <pre className="mt-2 p-2 bg-muted/40 rounded text-[10px] overflow-x-auto whitespace-pre-wrap">
+              {data.mermaid_code}
+            </pre>
+          </details>
+        )}
       </CardContent>
     </Card>
   )

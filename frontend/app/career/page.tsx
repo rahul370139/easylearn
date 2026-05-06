@@ -11,6 +11,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { RoadmapTimeline } from "@/components/roadmap-timeline"
+import { ResumeCareerUpgrade } from "@/components/resume-career-upgrade"
 import {
   Plus,
   X,
@@ -879,12 +880,17 @@ export default function CareerPage() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
           {/* Main Content */}
           <div className="lg:col-span-3">
-            <Tabs defaultValue="target" className="space-y-6">
-              <TabsList className="grid w-full grid-cols-3">
+            <Tabs defaultValue="resume" className="space-y-6">
+              <TabsList className="grid w-full grid-cols-4">
+                <TabsTrigger value="resume">Resume Upgrade</TabsTrigger>
                 <TabsTrigger value="target">Target Role</TabsTrigger>
                 <TabsTrigger value="interests">Interests</TabsTrigger>
                 <TabsTrigger value="skills">Skills</TabsTrigger>
               </TabsList>
+
+              <TabsContent value="resume" className="space-y-6">
+                <ResumeCareerUpgrade />
+              </TabsContent>
 
               <TabsContent value="target" className="space-y-6">
                 <Card className="border-0 shadow-lg">

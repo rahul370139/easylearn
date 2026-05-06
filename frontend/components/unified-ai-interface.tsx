@@ -13,6 +13,17 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { useAuth } from "@/components/auth-provider"
 import { chatAPI, agenticAPI } from "@/lib/api"
+
+const SUPPORTED_TYPES = new Set([
+  "text",
+  "lesson",
+  "summary",
+  "flashcards",
+  "quiz",
+  "workflow",
+  "diagnostic",
+  "progress",
+])
 import { toast } from "@/components/ui/use-toast"
 import {
   FlashcardsComponent,
@@ -223,313 +234,77 @@ export function UnifiedAIInterface({
       userId: user?.id || undefined,
     }
 
-    // PRIORITY: Check for explicit type first (from API responses)
-    if (data.type === "quiz") {
-      console.log("Explicit quiz type detected", data)
-      messageData.type = "quiz"
-      if (data.questions && Array.isArray(data.questions)) {
-        messageData.quizData = data.questions
-      } else if (data.response) {
-        // Parse quiz from text response
-        messageData.quizData = parseQuizFromText(data.response)
-      }
-      return messageData
-    }
-    
-    if (data.type === "diagnostic") {
-      console.log("Explicit diagnostic type detected", data)
-      messageData.type = "diagnostic"
-      // Use consistent diagnostic questions
-      const consistentQuestions = [
-        {
-          question: "What is the main topic or subject of this document?",
-          options: ["The document covers multiple unrelated topics", "The main topic is clearly defined and focused", "Multiple related topics are discussed", "The topic is ambiguous and unclear"],
-          answer: "The main topic is clearly defined and focused",
-          type: "multiple_choice" as const,
-          explanation: "A well-structured document should have a clear, focused main topic.",
-          topic: "comprehension"
-        },
-        {
-          question: "The document provides practical examples and applications.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content typically includes practical examples to enhance understanding.",
-          topic: "application"
-        },
-        {
-          question: "Fill in the blank: The document's main strength is its ________ approach to learning.",
-          options: ["structured", "random", "complex", "simple"],
-          answer: "structured",
-          type: "fill_blank" as const,
-          explanation: "Educational documents should have a structured approach to facilitate learning.",
-          topic: "structure"
-        },
-        {
-          question: "How would you rate the complexity of the information presented?",
-          options: ["Very basic and easy to understand", "Moderately complex with some challenging concepts", "Highly complex requiring advanced knowledge", "Inconsistent complexity throughout"],
-          answer: "Moderately complex with some challenging concepts",
-          type: "multiple_choice" as const,
-          explanation: "Most educational content should be moderately complex to provide learning value.",
-          topic: "analysis"
-        },
-        {
-          question: "The document contains clear learning objectives and outcomes.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Effective educational content should clearly state what learners will achieve.",
-          topic: "objectives"
-        },
-        {
-          question: "Fill in the blank: The most effective way to learn from this document is through ________ practice.",
-          options: ["active", "passive", "random", "quick"],
-          answer: "active",
-          type: "fill_blank" as const,
-          explanation: "Active learning through practice and application is more effective than passive reading.",
-          topic: "learning_method"
-        },
-        {
-          question: "What is the primary purpose of this document?",
-          options: ["To inform about a topic", "To teach specific skills or concepts", "To persuade the reader", "To entertain the audience"],
-          answer: "To teach specific skills or concepts",
-          type: "multiple_choice" as const,
-          explanation: "Educational documents are primarily designed to teach and transfer knowledge.",
-          topic: "purpose"
-        },
-        {
-          question: "The document is well-organized and easy to follow.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content should be well-structured for effective learning.",
-          topic: "structure"
-        },
-        {
-          question: "Fill in the blank: To maximize learning from this document, you should take ________ while reading.",
-          options: ["notes", "breaks", "photos", "naps"],
-          answer: "notes",
-          type: "fill_blank" as const,
-          explanation: "Taking notes helps with retention and understanding of the material.",
-          topic: "study_skills"
-        },
-        {
-          question: "Which learning strategy would be most effective for this type of content?",
-          options: ["Read once quickly", "Read multiple times with practice", "Read only the summary", "Skip the examples"],
-          answer: "Read multiple times with practice",
-          type: "multiple_choice" as const,
-          explanation: "Repeated reading combined with practice exercises leads to better retention and understanding.",
-          topic: "learning_strategy"
-        }
-      ]
-      messageData.quizData = consistentQuestions
+    // Trust the backend `type` first. Backend handlers in distiller.py set this explicitly
+    // for lesson/quiz/flashcards/workflow/summary/diagnostic. Fall back to keyword sniff
+    // only when no explicit type came through (e.g. plain chat that returned quiz-like text).
+    const explicitType = typeof data.type === "string" ? data.type : ""
+
+    if (explicitType === "quiz" || explicitType === "diagnostic") {
+      const questions =
+        (Array.isArray(data.quiz) && data.quiz) ||
+        (Array.isArray(data.questions) && data.questions) ||
+        (data.quiz_data && Array.isArray(data.quiz_data.questions) && data.quiz_data.questions) ||
+        parseQuizFromText(data.response || "")
+      messageData.type = explicitType as Message["type"]
+      messageData.quizData = questions
       return messageData
     }
 
-    // Detect quiz format - PRIORITY: Check quiz FIRST
-    else if (data.questions || (data.response && data.response.includes("Question") && data.response.includes("A)"))) {
-      console.log("Quiz detected - using quiz format")
-      messageData.type = "quiz"
-      if (data.questions && Array.isArray(data.questions)) {
-        messageData.quizData = data.questions
-      } else {
-        // Parse quiz from text response
-        messageData.quizData = parseQuizFromText(data.response)
-      }
-    }
-
-    // Detect flashcards format
-    else if (
-      data.flashcards ||
-      (data.response && (data.response.includes("Front:") || data.response.includes("Card")))
-    ) {
+    if (explicitType === "flashcards") {
+      const cards =
+        (Array.isArray(data.flashcards) && data.flashcards) ||
+        (data.flashcard_data && Array.isArray(data.flashcard_data.cards) && data.flashcard_data.cards) ||
+        parseFlashcardsFromText(data.response || "")
       messageData.type = "flashcards"
-      if (data.flashcards) {
-        messageData.flashcardData = data.flashcards
+      messageData.flashcardData = cards
+      return messageData
+    }
+
+    if (explicitType === "summary") {
+      messageData.type = "summary"
+      const sd = data.summary_data
+      if (sd && typeof sd === "object") {
+        const title = sd.title ? `**${sd.title}**\n\n` : ""
+        const overview = sd.overview ? `${sd.overview}` : ""
+        messageData.summaryData = (title + overview).trim() || data.response || ""
+        messageData.keyPoints = Array.isArray(sd.key_points) ? sd.key_points : []
       } else {
-        // Parse flashcards from text response
-        messageData.flashcardData = parseFlashcardsFromText(data.response)
-      }
-    }
-
-    // Detect lesson format - check this BEFORE summary to avoid conflicts
-    else if (
-      data.lesson ||
-      data.content ||
-      (data.response && (
-        data.response.includes("Lesson:") || 
-        data.response.includes("Learning Objectives:") ||
-        data.response.includes("Lesson Plan") ||
-        data.response.includes("Structured Lesson") ||
-        data.response.toLowerCase().includes("lesson plan") ||
-        data.response.toLowerCase().includes("learning objectives")
-      ))
-    ) {
-      console.log("Detected lesson format:", { 
-        hasLesson: !!data.lesson, 
-        hasContent: !!data.content, 
-        responseLength: data.response?.length,
-        responsePreview: data.response?.substring(0, 100)
-      })
-      messageData.type = "lesson"
-      messageData.lessonData = data.lesson || data.content || data.response
-    }
-
-    // Detect summary format
-    else if (
-      data.summary ||
-      data.key_points ||
-      (data.response && (
-        data.response.includes("Summary:") || 
-        data.response.includes("Key Points:") ||
-        data.response.includes("Document Summary") ||
-        data.response.includes("Summary Overview") ||
-        data.response.toLowerCase().includes("summary") ||
-        data.response.toLowerCase().includes("overview") ||
-        data.response.toLowerCase().includes("key takeaways")
-      ))
-    ) {
-      console.log("Detected summary format:", { 
-        hasSummary: !!data.summary, 
-        hasKeyPoints: !!data.key_points, 
-        responseLength: data.response?.length,
-        responsePreview: data.response?.substring(0, 100)
-      })
-      messageData.type = "summary"
-      messageData.summaryData = data.summary || data.response
-      messageData.keyPoints = data.key_points
-        ? Array.isArray(data.key_points)
+        messageData.summaryData = data.summary || data.response || ""
+        messageData.keyPoints = Array.isArray(data.key_points)
           ? data.key_points
-          : [data.key_points]
-        : parseKeyPointsFromText(data.response)
-    }
-    
-    // Fallback: If this is a summary request from the quick actions, force summary type
-    else if (data.response && data.response.includes("comprehensive summary")) {
-      console.log("Forcing summary type for summary request")
-      messageData.type = "summary"
-      messageData.summaryData = data.response
-      messageData.keyPoints = parseKeyPointsFromText(data.response)
+          : parseKeyPointsFromText(data.response || "")
+      }
+      return messageData
     }
 
-
-    // Fallback diagnostic detection - if response contains diagnostic keywords
-    else if (
-      data.response && (
-        data.response.toLowerCase().includes("diagnostic") || 
-        data.response.toLowerCase().includes("assessment") ||
-        data.response.toLowerCase().includes("test your knowledge") ||
-        data.response.toLowerCase().includes("knowledge test")
-      )
-    ) {
-      console.log("Fallback diagnostic detection triggered")
-      messageData.type = "diagnostic"
-      // Use consistent diagnostic questions
-      const consistentQuestions = [
-        {
-          question: "What is the main topic or subject of this document?",
-          options: ["The document covers multiple unrelated topics", "The main topic is clearly defined and focused", "Multiple related topics are discussed", "The topic is ambiguous and unclear"],
-          answer: "The main topic is clearly defined and focused",
-          type: "multiple_choice" as const,
-          explanation: "A well-structured document should have a clear, focused main topic.",
-          topic: "comprehension"
-        },
-        {
-          question: "The document provides practical examples and applications.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content typically includes practical examples to enhance understanding.",
-          topic: "application"
-        },
-        {
-          question: "Fill in the blank: The document's main strength is its ________ approach to learning.",
-          options: ["structured", "random", "complex", "simple"],
-          answer: "structured",
-          type: "fill_blank" as const,
-          explanation: "Educational documents should have a structured approach to facilitate learning.",
-          topic: "structure"
-        },
-        {
-          question: "How would you rate the complexity of the information presented?",
-          options: ["Very basic and easy to understand", "Moderately complex with some challenging concepts", "Highly complex requiring advanced knowledge", "Inconsistent complexity throughout"],
-          answer: "Moderately complex with some challenging concepts",
-          type: "multiple_choice" as const,
-          explanation: "Most educational content should be moderately complex to provide learning value.",
-          topic: "analysis"
-        },
-        {
-          question: "The document contains clear learning objectives and outcomes.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Effective educational content should clearly state what learners will achieve.",
-          topic: "objectives"
-        },
-        {
-          question: "Fill in the blank: The most effective way to learn from this document is through ________ practice.",
-          options: ["active", "passive", "random", "quick"],
-          answer: "active",
-          type: "fill_blank" as const,
-          explanation: "Active learning through practice and application is more effective than passive reading.",
-          topic: "learning_method"
-        },
-        {
-          question: "What is the primary purpose of this document?",
-          options: ["To inform about a topic", "To teach specific skills or concepts", "To persuade the reader", "To entertain the audience"],
-          answer: "To teach specific skills or concepts",
-          type: "multiple_choice" as const,
-          explanation: "Educational documents are primarily designed to teach and transfer knowledge.",
-          topic: "purpose"
-        },
-        {
-          question: "The document is well-organized and easy to follow.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content should be well-structured for effective learning.",
-          topic: "structure"
-        },
-        {
-          question: "Fill in the blank: To maximize learning from this document, you should take ________ while reading.",
-          options: ["notes", "breaks", "photos", "naps"],
-          answer: "notes",
-          type: "fill_blank" as const,
-          explanation: "Taking notes helps with retention and understanding of the material.",
-          topic: "study_skills"
-        },
-        {
-          question: "Which learning strategy would be most effective for this type of content?",
-          options: ["Read once quickly", "Read multiple times with practice", "Read only the summary", "Skip the examples"],
-          answer: "Read multiple times with practice",
-          type: "multiple_choice" as const,
-          explanation: "Repeated reading combined with practice exercises leads to better retention and understanding.",
-          topic: "learning_strategy"
-        }
-      ]
-      messageData.quizData = consistentQuestions
-    }
-
-    // Detect workflow format - AFTER diagnostic to avoid conflicts
-    else if (
-      data.workflow ||
-      (data.response &&
-        (data.response.includes("workflow") || 
-         data.response.includes("mermaid") || 
-         data.response.includes("graph") ||
-         data.response.includes("flowchart") ||
-         data.response.includes("diagram") ||
-         data.response.includes("sequence") ||
-         data.response.includes("pipeline") ||
-         (data.response.includes("process") && data.response.includes("step")) ||
-         (data.response.includes("flow") && data.response.includes("chart"))))
-    ) {
+    if (explicitType === "workflow") {
       messageData.type = "workflow"
-      messageData.workflowData = data.workflow || data.response
+      // Pass the structured workflow_data straight through so WorkflowComponent
+      // can render rich fields (inputs/outputs/tools/pitfalls/branches/mermaid).
+      // Falls back to the raw response text if the backend gave us nothing
+      // structured.
+      messageData.workflowData = data.workflow_data || data.workflow || data.response || ""
+      return messageData
     }
 
-    console.log("Final parsed messageData:", messageData)
-    console.log("Message type detected:", messageData.type)
+    if (explicitType === "lesson") {
+      messageData.type = "lesson"
+      messageData.lessonData = data.lesson_data || data.lesson || data.content || data.response
+      return messageData
+    }
+
+    // Lightweight fallback heuristics for plain chat responses that *look* structured.
+    if (Array.isArray(data.questions) && data.questions.length) {
+      messageData.type = "quiz"
+      messageData.quizData = data.questions
+      return messageData
+    }
+    if (Array.isArray(data.flashcards) && data.flashcards.length) {
+      messageData.type = "flashcards"
+      messageData.flashcardData = data.flashcards
+      return messageData
+    }
+
     return messageData
   }
 
@@ -752,8 +527,11 @@ export function UnifiedAIInterface({
           selectedLevel === "beginner" ? "5_year_old" : selectedLevel === "intermediate" ? "intern" : "senior",
         )
 
-        if (uploadResponse.pdf_id) {
-          setUploadedPdfId(uploadResponse.pdf_id)
+        // Backend returns `lesson_id` (from supabase_helper.insert_lesson). Older shape used `pdf_id`.
+        // We accept either as the document identifier so mastery / diagnostic results can be tied to it.
+        const docId = uploadResponse.pdf_id || uploadResponse.lesson_id
+        if (docId) {
+          setUploadedPdfId(String(docId))
         }
 
         setUploadedFiles([])
@@ -807,149 +585,50 @@ export function UnifiedAIInterface({
   }
 
   const handleQuickAction = async (action: (typeof quickActions)[0]) => {
-    if (!uploadedPdfId && action.id !== "lesson") {
-      setInputMessage(action.prompt)
-      const inputElement = document.querySelector('input[placeholder*="Ask me anything"]') as HTMLInputElement
-      if (inputElement) {
-        inputElement.focus()
-      }
-      return
+    // Single path: send the action prompt straight through the chat API.
+    // The backend (`process_chat_message` in distiller.py) detects the intent
+    // (summary / lesson / quiz / flashcards / workflow / diagnostic), runs RAG
+    // over the uploaded PDF chunks, and returns a typed payload.
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      content: action.prompt,
+      sender: "user",
+      timestamp: new Date(),
     }
+    setMessages((prev) => [...prev, userMessage])
+    setIsLoading(true)
 
-    // For actions that require PDF processing, use agentic API directly
-    if (uploadedPdfId && user?.id) {
-      setIsLoading(true)
+    try {
+      const data = await chatAPI.sendMessage({
+        message: action.prompt,
+        user_id: user?.id || "anonymous-user",
+        explanation_level:
+          selectedLevel === "beginner" ? "5_year_old" : selectedLevel === "intermediate" ? "intern" : "senior",
+        conversation_id: conversationId || undefined,
+      })
 
-      try {
-        let apiResponse
-
-        switch (action.id) {
-          case "flashcards":
-            apiResponse = await agenticAPI.generateFlashcards({
-              pdf_id: uploadedPdfId,
-              user_id: user.id,
-              num: 10,
-            })
-            break
-
-          case "quiz":
-            try {
-              console.log("Calling quiz API with:", { pdf_id: uploadedPdfId, user_id: user.id, num: 10 })
-              apiResponse = await agenticAPI.generateQuiz({
-                pdf_id: uploadedPdfId,
-                user_id: user.id,
-                num: 10,
-              })
-              console.log("Quiz API Response:", apiResponse)
-              // Force quiz type for quiz button
-              apiResponse = { ...apiResponse, type: "quiz" }
-              console.log("Forced quiz type:", apiResponse.type)
-            } catch (error) {
-              console.error("Quiz API Error:", error)
-              // Fallback to chat API if agentic API fails
-              apiResponse = await chatAPI.sendMessage({
-                message: `Generate a quiz with 10 multiple choice questions based on the uploaded document. Make sure to format it as structured quiz questions with options A, B, C, D.`,
-                user_id: user.id,
-                pdf_id: uploadedPdfId,
-                explanation_level: "intern"
-              })
-              console.log("Fallback chat API response:", apiResponse)
-              // Force quiz type for quiz button
-              apiResponse = { ...apiResponse, type: "quiz" }
-            }
-            break
-
-          case "summary":
-            apiResponse = await agenticAPI.generateSummary({
-              pdf_id: uploadedPdfId,
-              user_id: user.id,
-            })
-            break
-
-          case "workflow":
-            apiResponse = await agenticAPI.generateWorkflow({
-              pdf_id: uploadedPdfId,
-              user_id: user.id,
-            })
-            break
-
-          case "diagnostic":
-            try {
-              console.log("Calling diagnostic API with:", { pdf_id: uploadedPdfId, user_id: user.id, num: 10 })
-              apiResponse = await agenticAPI.startDiagnostic({
-                pdf_id: uploadedPdfId,
-                user_id: user.id,
-                num: 10,
-              })
-              console.log("Diagnostic API Response:", apiResponse)
-              // Force diagnostic type for diagnostic button
-              apiResponse = { ...apiResponse, type: "diagnostic" }
-              console.log("Forced diagnostic type:", apiResponse.type)
-            } catch (error) {
-              console.error("Diagnostic API Error:", error)
-              // Fallback to chat API if agentic API fails
-              apiResponse = await chatAPI.sendMessage({
-                message: `Generate a diagnostic assessment with 10 multiple choice questions based on the uploaded document. Make sure to format it as structured quiz questions with options A, B, C, D.`,
-                user_id: user.id,
-                pdf_id: uploadedPdfId,
-                explanation_level: "intern"
-              })
-              console.log("Fallback chat API response:", apiResponse)
-              // Force diagnostic type for diagnostic button
-              apiResponse = { ...apiResponse, type: "diagnostic" }
-            }
-            break
-
-          default:
-            // For lesson and other actions, fall back to chat API
-            setInputMessage(action.prompt)
-            const inputElement = document.querySelector('input[placeholder*="Ask me anything"]') as HTMLInputElement
-            if (inputElement) {
-              inputElement.focus()
-            }
-            setIsLoading(false)
-            return
-        }
-
-        // Create user message for the action
-        const userMessage: Message = {
-          id: Date.now().toString(),
-          content: `Generate ${action.label.toLowerCase()} from the uploaded document`,
-          sender: "user",
-          timestamp: new Date(),
-        }
-
-        setMessages((prev) => [...prev, userMessage])
-
-        // Parse the API response and create AI message
-        const parsedData = parseAPIResponse(apiResponse)
-
-        const aiMessage: Message = {
-          id: (Date.now() + 1).toString(),
-          content: parsedData.content || "Response received",
-          sender: "ai",
-          timestamp: new Date(),
-          ...parsedData,
-        }
-
-        setMessages((prev) => [...prev, aiMessage])
-      } catch (error) {
-        console.error(`Error generating ${action.label}:`, error)
-        toast({
-          title: "Error",
-          description: `Failed to generate ${action.label.toLowerCase()}. Please try again.`,
-          variant: "destructive",
-        })
-      } finally {
-        setIsLoading(false)
+      if (data.conversation_id && onConversationIdChange) {
+        onConversationIdChange(data.conversation_id)
       }
-    } else {
-      // No PDF uploaded, just set the prompt
-      setInputMessage(action.prompt)
-      const inputElement = document.querySelector('input[placeholder*="Ask me anything"]') as HTMLInputElement
-      if (inputElement) {
-        inputElement.focus()
+
+      const parsedData = parseAPIResponse(data)
+      const aiMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: parsedData.content || "Response received",
+        sender: "ai",
+        timestamp: new Date(),
+        ...parsedData,
       }
+      setMessages((prev) => [...prev, aiMessage])
+    } catch (error) {
+      console.error(`Error generating ${action.label}:`, error)
+      toast({
+        title: "Error",
+        description: `Failed to generate ${action.label.toLowerCase()}. Please try again.`,
+        variant: "destructive",
+      })
+    } finally {
+      setIsLoading(false)
     }
   }
 
@@ -1067,11 +746,7 @@ export function UnifiedAIInterface({
       return (
         <div className="mt-4">
           <WorkflowComponent
-            workflow={
-              typeof message.workflowData === "string"
-                ? message.workflowData
-                : JSON.stringify(message.workflowData, null, 2)
-            }
+            workflow={message.workflowData}
             onAction={(action) => {
               if (action === "copy") {
                 const workflowText =
@@ -1079,46 +754,6 @@ export function UnifiedAIInterface({
                     ? message.workflowData
                     : JSON.stringify(message.workflowData, null, 2)
                 navigator.clipboard.writeText(workflowText)
-                toast({ title: "Copied", description: "Workflow copied to clipboard." })
-              }
-            }}
-          />
-        </div>
-      )
-    }
-
-    // Fallback for workflow without specific data - generate a learning workflow
-    if (message.type === "workflow") {
-      const defaultWorkflow = `Learning Workflow
-
-1. Start Learning
-   Begin your learning journey with the uploaded content
-
-2. Read and Understand
-   Carefully review the material to grasp key concepts
-
-3. Take Notes
-   Write down important points and insights
-
-4. Practice Application
-   Apply the concepts through exercises or examples
-
-5. Test Knowledge
-   Take quizzes or assessments to verify understanding
-
-6. Review and Reflect
-   Go back to difficult sections and reinforce learning
-
-7. Complete Learning
-   Finish the learning process with confidence`
-      
-      return (
-        <div className="mt-4">
-          <WorkflowComponent
-            workflow={defaultWorkflow}
-            onAction={(action) => {
-              if (action === "copy") {
-                navigator.clipboard.writeText(defaultWorkflow)
                 toast({ title: "Copied", description: "Workflow copied to clipboard." })
               }
             }}
@@ -1147,93 +782,15 @@ export function UnifiedAIInterface({
       )
     }
 
-    // Diagnostic - ALWAYS use consistent format with mixed question types
     if (message.type === "diagnostic") {
-      console.log("Rendering diagnostic with proper mixed question types")
-      // Use the same consistent questions that were set during detection or fallback to complete set
-      const diagnosticQuestions = message.quizData || [
-        {
-          question: "What is the main topic or subject of this document?",
-          options: ["The document covers multiple unrelated topics", "The main topic is clearly defined and focused", "Multiple related topics are discussed", "The topic is ambiguous and unclear"],
-          answer: "The main topic is clearly defined and focused",
-          type: "multiple_choice" as const,
-          explanation: "A well-structured document should have a clear, focused main topic.",
-          topic: "comprehension"
-        },
-        {
-          question: "The document provides practical examples and applications.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content typically includes practical examples to enhance understanding.",
-          topic: "application"
-        },
-        {
-          question: "Fill in the blank: The document's main strength is its ________ approach to learning.",
-          options: ["structured", "random", "complex", "simple"],
-          answer: "structured",
-          type: "fill_blank" as const,
-          explanation: "Educational documents should have a structured approach to facilitate learning.",
-          topic: "structure"
-        },
-        {
-          question: "How would you rate the complexity of the information presented?",
-          options: ["Very basic and easy to understand", "Moderately complex with some challenging concepts", "Highly complex requiring advanced knowledge", "Inconsistent complexity throughout"],
-          answer: "Moderately complex with some challenging concepts",
-          type: "multiple_choice" as const,
-          explanation: "Most educational content should be moderately complex to provide learning value.",
-          topic: "analysis"
-        },
-        {
-          question: "The document contains clear learning objectives and outcomes.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Effective educational content should clearly state what learners will achieve.",
-          topic: "objectives"
-        },
-        {
-          question: "Fill in the blank: The most effective way to learn from this document is through ________ practice.",
-          options: ["active", "passive", "random", "quick"],
-          answer: "active",
-          type: "fill_blank" as const,
-          explanation: "Active learning through practice and application is more effective than passive reading.",
-          topic: "learning_method"
-        },
-        {
-          question: "What is the primary purpose of this document?",
-          options: ["To inform about a topic", "To teach specific skills or concepts", "To persuade the reader", "To entertain the audience"],
-          answer: "To teach specific skills or concepts",
-          type: "multiple_choice" as const,
-          explanation: "Educational documents are primarily designed to teach and transfer knowledge.",
-          topic: "purpose"
-        },
-        {
-          question: "The document is well-organized and easy to follow.",
-          options: ["True", "False"],
-          answer: "True",
-          type: "true_false" as const,
-          explanation: "Good educational content should be well-structured for effective learning.",
-          topic: "structure"
-        },
-        {
-          question: "Fill in the blank: To maximize learning from this document, you should take ________ while reading.",
-          options: ["notes", "breaks", "photos", "naps"],
-          answer: "notes",
-          type: "fill_blank" as const,
-          explanation: "Taking notes helps with retention and understanding of the material.",
-          topic: "study_skills"
-        },
-        {
-          question: "Which learning strategy would be most effective for this type of content?",
-          options: ["Read once quickly", "Read multiple times with practice", "Read only the summary", "Skip the examples"],
-          answer: "Read multiple times with practice",
-          type: "multiple_choice" as const,
-          explanation: "Repeated reading combined with practice exercises leads to better retention and understanding.",
-          topic: "learning_strategy"
-        }
-      ]
-      
+      const diagnosticQuestions = message.quizData || []
+      if (!diagnosticQuestions.length) {
+        return (
+          <div className="mt-4 text-sm text-muted-foreground">
+            I couldn't build a grounded diagnostic from this document. Please try again, or upload a clearer PDF.
+          </div>
+        )
+      }
       return (
         <div className="mt-4">
           <DiagnosticComponent
