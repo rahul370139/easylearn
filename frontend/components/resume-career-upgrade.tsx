@@ -253,7 +253,7 @@ export function ResumeCareerUpgrade() {
   }
 
   const handleBuildPlan = async () => {
-    if (!parsed || !targetRole) return
+    if (!targetRole || (!parsed && !resumeFile)) return
     setBuilding(true)
     try {
       // Prefer the one-shot endpoint when we still have the source PDF in-memory.
@@ -340,13 +340,13 @@ export function ResumeCareerUpgrade() {
         </CardContent>
       </Card>
 
-      {/* Step 2 — review parsed resume */}
+      {/* Optional review — auto-extracted resume details */}
       {parsed && (
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Brain className="h-5 w-5" />
-              2. Review what we found
+              Resume details we found
             </CardTitle>
             <CardDescription>
               {parsed.name ? `${parsed.name}` : "Profile"}
@@ -409,12 +409,12 @@ export function ResumeCareerUpgrade() {
         </Card>
       )}
 
-      {/* Step 3 — target + interests + generate */}
+      {/* Step 2 — target + interests + generate */}
       <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Target className="h-5 w-5" />
-              3. Target role & interests
+              2. Target role & interests
             </CardTitle>
             <CardDescription>
               We'll match this against the O*NET / BLS dataset and build a tailored plan.
@@ -484,7 +484,7 @@ export function ResumeCareerUpgrade() {
 
             <Button
               onClick={handleBuildPlan}
-              disabled={!parsed || !targetRole || building}
+              disabled={!targetRole || building || (!parsed && !resumeFile)}
               className="w-full bg-gradient-to-r from-blue-600 to-purple-600"
             >
               {building ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
