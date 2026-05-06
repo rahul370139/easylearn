@@ -36,6 +36,35 @@ function urlFor(pathWithLeadingSlash: string): string {
   return API_BASE_URL ? `${API_BASE_URL}${pathWithLeadingSlash}` : pathWithLeadingSlash
 }
 
+function getDirectBackendBaseForBrowser(): string {
+  const raw = (process.env.NEXT_PUBLIC_API_BASE_URL || "").trim().replace(/\/+$/, "").replace(/\/api$/i, "")
+  if (!raw) return ""
+  if (typeof window !== "undefined" && window.location.protocol === "https:" && raw.startsWith("http://")) {
+    // Browser will block mixed-content HTTP calls from HTTPS pages.
+    return ""
+  }
+  return raw
+}
+
+async function postFormWith404Fallback<T>(path: string, formData: FormData, errorLabel: string): Promise<T> {
+  const primaryUrl = urlFor(path)
+  const first = await fetch(primaryUrl, { method: "POST", body: formData })
+  if (first.ok) return first.json() as Promise<T>
+
+  // Common production failure: same-origin /api route exists but returns 404
+  // due to proxy/rewrite mismatch. Retry directly against backend URL when safe.
+  if (first.status === 404 && !API_BASE_URL) {
+    const directBase = getDirectBackendBaseForBrowser()
+    if (directBase) {
+      const retry = await fetch(`${directBase}${path}`, { method: "POST", body: formData })
+      if (retry.ok) return retry.json() as Promise<T>
+      throw new Error(`${errorLabel}: ${retry.status}`)
+    }
+  }
+
+  throw new Error(`${errorLabel}: ${first.status}`)
+}
+
 interface ApiResponse<T = any> {
   data?: T
   error?: string
@@ -286,11 +315,7 @@ export const careerAPI = {
   parseResume: (file: File) => {
     const formData = new FormData()
     formData.append("file", file)
-    const url = urlFor("/api/career/resume/parse")
-    return fetch(url, { method: "POST", body: formData }).then((res) => {
-      if (!res.ok) throw new Error(`Resume parse failed: ${res.status}`)
-      return res.json() as Promise<{ resume: any }>
-    })
+    return postFormWith404Fallback<{ resume: any }>("/api/career/resume/parse", formData, "Resume parse failed")
   },
 
   // Step 2 — given parsed resume + target role + interests, build the plan.
@@ -320,11 +345,7 @@ export const careerAPI = {
     formData.append("file", file)
     const qs = new URLSearchParams({ target_role, interests: interests.join(",") })
     if (user_id) qs.set("user_id", user_id)
-    const url = urlFor(`/api/career/upgrade?${qs.toString()}`)
-    return fetch(url, { method: "POST", body: formData }).then((res) => {
-      if (!res.ok) throw new Error(`Career upgrade failed: ${res.status}`)
-      return res.json()
-    })
+    return postFormWith404Fallback(`/api/career/upgrade?${qs.toString()}`, formData, "Career upgrade failed")
   },
 }
 
